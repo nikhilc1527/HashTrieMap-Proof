@@ -21,18 +21,7 @@
 -Q src/generatedproof New.generatedproof
 -Q src/code New.code
 
-# copy perennial's dependencies
--Q perennial/external/stdpp/stdpp stdpp
--Q perennial/external/stdpp/stdpp_unstable stdpp.unstable
--Q perennial/external/stdpp/stdpp_bitvector stdpp.bitvector
--Q perennial/external/iris/iris iris
--Q perennial/external/iris/iris_deprecated iris.deprecated
--Q perennial/external/iris/iris_unstable iris.unstable
--Q perennial/external/iris/iris_heap_lang iris.heap_lang
--Q perennial/external/coqutil/src/coqutil coqutil
--Q perennial/external/record-update/src RecordUpdate
--Q perennial/external/iris-named-props/src iris_named_props
-# perennial itself
+# perennial
 -Q perennial/src Perennial
 -Q perennial/new New
 -Q perennial/external/Goose Goose
