@@ -1,6 +1,6 @@
 From New.generatedproof.hashtriemap Require Import hashtriemap.
-From New.proof.sync Require Import atomic.
 From New.proof Require Import sync.
+From New.proof.sync Require Import atomic.
 
 Section proof.
 Context `{hG: heapGS Σ, !ffi_semantics _ _} `{!globalsGS Σ} {go_ctx: GoContext}.

@@ -1,5 +1,6 @@
-SRC_DIRS := 'src'
+SRC_DIRS := 'src' 'perennial/new' 'perennial/src'
 PROJ_VFILES := $(shell fd -I -H -e v -E '*__nobuild.v' . $(SRC_DIRS))
+ALL_VFILES := $(shell fd -I -H -e v -E '*__nobuild.v' . $(SRC_DIRS) 'perennial/external')
 GOOSE_CONFIG_FILES := $(shell fd -I -H -e "v.toml" -E '*__nobuild.v' . src)
 GO_DIR := 'src'
 GO_FILES := $(shell find $(GO_DIR) -name "*.go")
@@ -25,9 +26,9 @@ vok: $(PROJ_VFILES:.v=.vok)
 	$(Q)perennial-cli goose
 	@touch $@
 
-.rocqdeps.d: $(PROJ_VFILES) _RocqProject .goose-output
+.rocqdeps.d: $(ALL_VFILES) _RocqProject .goose-output
 	@echo "ROCQ dep $@"
-	$(Q)rocq dep $(ROCQ_DEP_ARGS) -vos -f _RocqProject $(PROJ_VFILES) > $@
+	$(Q)rocq dep $(ROCQ_DEP_ARGS) -vos -f _RocqProject $(ALL_VFILES) > $@
 
 # do not try to build dependencies if cleaning
 ifeq ($(filter clean,$(MAKECMDGOALS)),)

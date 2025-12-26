@@ -1,4 +1,4 @@
--Q src New
+# -Q src New
 -arg -w -arg +deprecated-instance-without-locality
 # don't allow ambiguous coercions
 -arg -w -arg +ambiguous-paths

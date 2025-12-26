@@ -1,2 +1,2 @@
 rocq = "src"
-go_path = "sync"
+go_path = "hashtriemap"
