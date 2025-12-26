@@ -1,9 +1,0 @@
-#!/bin/sh
-
-set -xe
-
-rm -rf src/code src/generatedproof # src/proof
-
-goose -dir sync -out src/code ./...
-proofgen -dir sync -configdir src/code -out src/generatedproof ./...
-# proof-setup -dir sync -out src/proof ./...

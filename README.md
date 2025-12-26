@@ -1,4 +1,4 @@
-# go_sync_proof
+# go HashTrieMap proof
 
 This repository is a proof-oriented adaptation of Go's internal `sync` HashTrieMap
 implementation. The code is adjusted to fit Goose and Rocq (Coq) tooling constraints
@@ -12,7 +12,7 @@ so that the map can be translated and verified.
 
 ## Source of Truth
 - Upstream: `https://github.com/golang/go/blob/master/src/internal/sync/hashtriemap.go`
-- Adapted: `sync/stdsync/hashtriemap.go`
+- Adapted: `sync/hashtriemap/hashtriemap.go`
 
 ## Current Changes from Upstream
 - Package and imports: `package sync` → `package stdsync`; removed `internal/abi`, `internal/goarch`; added `sync`.
@@ -27,7 +27,7 @@ so that the map can be translated and verified.
 ## Goose/Rocq Constraints
 - No generics (including `atomic.Pointer[T]`).
 - `range` only supported over slices and maps.
-- Method name `init` can be treated specially and may need renaming if Goose skips it.
+- Method name `init` can be treated specially and may need renaming if Goose skips it.  
 These limitations are the reason for the differences between the implementation of HashTrieMap in this repository and the original HashTrieMap from the go stdlib source code.
 
 ## Generated Artifacts
@@ -36,18 +36,17 @@ These limitations are the reason for the differences between the implementation 
 - Proof setup: `src/proof`
 
 ## Workflow
-1) Regenerate Goose and proof scaffolding:
-   ```sh
-   ./update_goose.sh
-   ```
-2) Build proofs:
+Build proofs:
    ```sh
    make
    ```
+relies on having perennial-cli installed
 
 ## Tests
-A small Go test exists at `sync/stdsync/hashtriemap_test.go` to sanity‑check
-basic behavior and concurrent usage. Note that this repository is not a
-standard Go module with packages discoverable by `go test ./...`, so you may
-need to run tests in a custom Go workspace or adjust module layout.
-
+A small Go test exists at `sync/stdsync/hashtriemap_test.go` to sanity-check
+basic behavior and concurrent usage, to make sure that the adapted implementation
+of HashTrieMap matches with the source material.
+```sh
+cd sync
+go test hashtriemap/hashtriemap
+```
