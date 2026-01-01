@@ -488,7 +488,7 @@ func (ht *HashTrieMap) Range(yield func(K, V) bool) {
 }
 
 func (ht *HashTrieMap) iter(i *indirect, yield func(key K, value V) bool) bool {
-	for j := range i.children[:] {
+	for j := range i.children {
 		n := i.children[j].Load().(*node)
 		if n == nil {
 			continue
@@ -536,12 +536,15 @@ type indirect struct {
 	dead     atomic.Bool
 	mu       sync.Mutex // Protects mutation to children and any children that are entry nodes.
 	parent   *indirect
-	children [nChildren]atomic.Value
+	children []atomic.Value
 }
 
 func newIndirectNode(parent *indirect) *indirect {
-	i := &indirect{parent: parent}
-	for idx := range i.children[:] {
+	i := &indirect{
+		parent:   parent,
+		children: make([]atomic.Value, nChildren),
+	}
+	for idx := range i.children {
 		i.children[idx].Store((*node)(nil))
 	}
 	i.node = &node{isEntry: false, ind: i}
@@ -550,7 +553,7 @@ func newIndirectNode(parent *indirect) *indirect {
 
 func (i *indirect) empty() bool {
 	nc := 0
-	for j := range i.children[:] {
+	for j := range i.children {
 		if i.children[j].Load().(*node) != nil {
 			nc++
 		}

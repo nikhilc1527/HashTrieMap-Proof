@@ -6,13 +6,13 @@ From New.proof.hashtriemap Require Import aux.
 From New.proof Require Import sync.
 From New.proof.sync Require Import atomic.
 
-From Perennial.base_logic.lib Require Import invariants.
 From iris.base_logic.lib Require Import invariants.
 From iris.proofmode Require Import proofmode.
 
-From Perennial.goose_lang.lib Require Import struct.
 From Perennial.goose_lang.lib Require Import atomic.
 From Perennial.algebra Require Import auth_map ghost_var.
+
+Open Scope Z_scope.
 
 Section proof.
   Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
@@ -25,29 +25,201 @@ Section proof.
   Lemma wp_newIndirectNode (parent: loc) (γ: ghost_names) (M: gmap w64 w64) :
     {{{ is_pkg_init hashtriemap ∗ hashtriemap_sub γ M }}}
       @! hashtriemap.newIndirectNode #parent
-      {{{ (i: loc), RET (#i);
-          ∃ (node: loc) (dead: atomic.Bool.t) (children: vec atomic.Value.t (uint.nat (W64 16))),
-            i ↦s[hashtriemap.indirect :: "node"] node ∗
-              node_is_indirect node i ∗
-              i ↦s[hashtriemap.indirect :: "dead"] dead ∗
-              i ↦s[hashtriemap.indirect :: "parent"] parent ∗
-              i ↦s[hashtriemap.indirect :: "children"] children ∗
-              indirect_rep i 0 0 M ∗
-              is_indirect γ i 0 0 M }}}.
-  Proof. Admitted.
-
-  Lemma own_Uint32_agree u dq dq' v v' :
-    own_Uint32 u dq v -∗ own_Uint32 u dq' v' -∗ ⌜v = v'⌝.
+      {{{ (ind: loc), RET (#ind);
+          is_indirect γ ind }}}.
   Proof.
-    iIntros "H1 H2".
-    destruct (own_Uint32_combines_gives with "H1" "H2").
-    pose proof (itrm u v v' dq dq' with "H1" "H2") as [Hcomb].
-    iDestruct combine_sep_gives as "H".
-    { exact Hcomb. }
-    iDestruct ("H" with "[$H1 $H2]") as "#Hpers".
-    iDestruct "Hpers" as %[_ Heq].
-    iPureIntro. exact Heq.
-  Qed.
+    wp_start as "Hpre".
+    wp_auto.
+    rename i_ptr into ind_ptr.
+    iRename "i" into "ind".
+
+    wp_apply (wp_slice_make2 (V:=atomic.Value.t)).
+    { unfold hashtriemap.nChildren. word. }
+    iIntros (children) "(Hchildren & _)".
+    wp_auto.
+    wp_alloc node as "node".
+    wp_auto.
+
+    set (children_vs := replicate (sint.nat (W64 hashtriemap.nChildren))
+                          atomic.into_val_typed_Value.(default_val atomic.Value.t)).
+
+    (*
+      TODO:
+      This invariant feels wrong because i=idx throughout the loop, but then i=idx+1 at the end of the loop
+      Either this invariant is actually right or the way goose handles slice range for loops is a bit off
+     *)
+    iAssert (
+        ∃ (vs: list atomic.Value.t) (idx i: w64),
+          "Hvs" :: children ↦* vs ∗
+          "i" :: i_ptr ↦ i ∗
+          "idx" :: idx_ptr ↦ idx ∗
+          "%Hi_idx" :: ⌜sint.Z i >= sint.Z idx⌝ ∗
+          "%Hi_bound" :: ⌜uint.Z i <= hashtriemap.nChildren⌝ ∗
+          "%Hlen" :: ⌜length vs = Z.to_nat hashtriemap.nChildren⌝ ∗
+          "%Hprefix" :: ⌜∀ (j: nat), j ≥ 0 → j < uint.Z i →
+                                     ∃ av, vs !! j = Some av ∧
+					     av = atomic.Value.mk (interface.mk (ptrT.id hashtriemap.node.id) (# null))⌝ ∗
+          "%Hsuffix" :: ⌜∀ (j: nat), j >= uint.Z i → j < length vs → vs !! j = children_vs !! j⌝
+      )%I with "[$Hchildren $i $idx]" as "IH".
+    {
+      iNamed.
+      unfold hashtriemap.nChildren.
+      iPureIntro.
+      simpl.
+      split_and!; auto; try word.
+      iIntros (j Hj Hj2).
+      exfalso.
+      word.
+    }
+
+    wp_for "IH".
+
+    iDestruct (own_slice_len_keep with "Hvs") as "(Hvs & %Hlen_slice & _)".
+
+    wp_if_destruct.
+    2: {
+      wp_alloc av_ptr as "av".
+
+      rewrite /is_indirect.
+      iApply struct_fields_split in "node".
+      iNamed "node".
+      iApply struct_fields_split in "av".
+      iNamed "av".
+      simpl.
+
+      iAssert (
+          indirect_inv γ node
+        )%I as "Hinv".
+      {
+        (* TODO: whatever this invariant ends up being, need to prove it here with M=∅ *)
+        admit.
+      }
+
+      iMod (init_Mutex with "Hmu Hinv") as "Hmu_init".
+
+      wp_auto.
+      simpl.
+      wp_finish.
+    }
+
+    wp_pure.
+    { split; word. }
+
+    have Hlookup_vs : (vs !! sint.nat i = Some (atomic.into_val_typed_Value.(default_val atomic.Value.t))).
+    {
+      have Hidx_lt : uint.nat i < length vs.
+      { rewrite Hlen. word. }
+
+      have Hsuffix_i : vs !! uint.nat i = children_vs !! uint.nat i.
+      { apply Hsuffix; [lia|exact Hidx_lt]. }
+
+      have Hsuit : sint.nat i = uint.nat i.
+      { word. }
+
+      rewrite Hsuit.
+      rewrite Hsuffix_i.
+      rewrite lookup_replicate_2; auto.
+      word.
+    }
+
+    wp_apply (wp_load_slice_elem with "[$Hvs]"); auto.
+    { word. }
+
+    iIntros "Hvs".
+
+    wp_auto.
+
+    wp_pure.
+    { split; cbn; word. }
+
+    wp_auto.
+
+    iDestruct ((own_slice_elem_acc) with "[$Hvs]") as "[Helem Hcont]"; eauto.
+    { word. }
+
+    iAssert (own_Value (slice.elem_ref_f children atomic.Value i) (DfracOwn 1) interface.nil)%I
+      with "[Helem]" as "Helem".
+    {
+      auto.
+    }
+
+    wp_apply wp_Value__Store.
+
+    iApply fupd_mask_intro.
+    { set_solver. }
+    iIntros "Hmask".
+    iNext.
+    iFrame "Helem".
+    iIntros "Helem".
+    iMod "Hmask".
+    iClear "Hmask".
+    iApply fupd_mask_intro.
+    {set_solver. }
+    iIntros "_".
+    wp_auto.
+
+    iDestruct ("Hcont" with "Helem") as "Hvs".
+
+    wp_for_post.
+
+    iFrame "Hpre HΦ parent ind node".
+
+    iFrame.
+
+    iSplit.
+    { word. }
+
+    iSplit.
+    { word. }
+    iSplit.
+    {
+      iPureIntro.
+      rewrite length_insert.
+      exact Hlen.
+    }
+    iSplit.
+    - iPureIntro. intros j Hj_ge Hj_lt.
+
+      have Hj_lte : j ≤ uint.Z i.
+      { word. }
+      clear Hj_lt.
+
+      apply Z_le_lt_eq_dec in Hj_lte.
+      destruct Hj_lte as [Hlt | Heq].
+
+      + (* j < i *)
+        specialize (Hprefix j) as Hprefix.
+        specialize (Hprefix Hj_ge Hlt).
+        destruct Hprefix as (av & Hlookup & Hav).
+        exists av.
+        split; auto.
+
+        rewrite list_lookup_insert_ne; auto.
+        word.
+      + (* j = i *)
+        exists {| atomic.Value.v' := interface.mk (ptrT.id hashtriemap.node.id) (# null) |}.
+        split; auto.
+        rewrite list_lookup_insert.
+        have Hbool : (sint.nat i = j ∧ (sint.nat i < length vs)%nat)%nat.
+        { word. }
+        by destruct (decide (sint.nat i = j ∧ (sint.nat i < length vs)%nat)) as [H|H];
+        [reflexivity | exfalso; exact (H Hbool)].
+    - iPureIntro. intros j Hj_ge Hj_lt.
+
+      have Hj_ge_i1_nat : (j ≥ uint.nat i + 1)%nat.
+      { word. }
+      have Hj_ge_i_Z : (j >= uint.Z i).
+      { word. }
+      have Hj_ge_i1_Z : (j >= uint.Z i + 1).
+      { word. }
+      have Hj_lt_len : (j < length vs).
+      { rewrite length_insert in Hj_lt. word. }
+
+      specialize (Hsuffix j) as Hsuffix.
+      specialize (Hsuffix Hj_ge_i_Z Hj_lt_len).
+      rewrite list_lookup_insert_ne; auto.
+      word.
+  Admitted.			(* only admitted because of the ind invariant needing proof *)
 
   Lemma wp_HashTrieMap__initSlow (ht: loc) :
     {{{ is_pkg_init hashtriemap ∗ is_pkg_init atomic ∗ is_pkg_init sync ∗
@@ -77,6 +249,7 @@ Section proof.
     iIntros "Hmask".
     iNext.
     iFrame.
+
     iIntros "Hinited".
 
     iDestruct (persistently_elim with "Hstatus_done") as "#Hstatus_done'".
@@ -131,7 +304,7 @@ Section proof.
     iIntros "Hmask".
     iNext.
     iFrame.
-    iExists None.
+    iExists interface.nil.
 
     iDestruct "Hmu_inv" as "(Hinit_tok2 & Hseed & Hroot & Hpre_auth)".
     iDestruct (ghost_var_agree with "Hinit_tok Hinit_tok2") as %Heq.
@@ -184,11 +357,9 @@ Section proof.
 
     iDestruct (hashtriemap_pre_auth_to_auth with "Hpre_auth") as "Hauth".
 
-    iDestruct "root_node" as (node dead children) "(Hnode & Hnode_hdr & Hdead & Hparent & Hchildren & Htrie & Hmu_is_mutex)".
-
     iAssert (ht_inv ht γ)%I with "[$]" as "Hhtinv".
 
-    iMod (invariants.inv_alloc (nroot.@"hashtriemap") _ (ht_inv ht γ) with "[Hhtinv]") as "#His_map".
+    iMod (invariants.inv_alloc mapN _ (ht_inv ht γ) with "[Hhtinv]") as "#His_map".
     { iNext. iExact "Hhtinv". }
 
     iMod ("Hclose" with "[Htok1 Hinited His_map]") as "_".
@@ -256,13 +427,20 @@ Section proof.
     {{{ is_pkg_init hashtriemap }}}
       @! hashtriemap.hashInt #key #seed
       {{{ (a: w64), RET (#a); True }}}.
-  Proof. Admitted.
+  Proof.
+    wp_start.
+    wp_auto.
+    wp_finish.
+  Qed.
 
   Lemma wp_HashTrieMap__Load (ht: loc) (key: w64) :
     {{{ is_pkg_init hashtriemap }}}
       ht @ (ptrT.id hashtriemap.HashTrieMap.id) @ "Load" #key
       {{{ (a: w64) (b: bool), RET (#a, #b); True }}}.
-  Proof. Admitted.
+  Proof.
+    wp_start.
+    wp_auto.
+  Admitted.
 
   Lemma wp_HashTrieMap__LoadOrStore (ht: loc) (key: w64) (value: w64) :
     {{{ is_pkg_init hashtriemap }}}
@@ -316,7 +494,10 @@ Section proof.
     {{{ is_pkg_init hashtriemap }}}
       ht @ (ptrT.id hashtriemap.HashTrieMap.id) @ "find" #key #hash #checkValue #value
       {{{ (a: loc) (b: w64) (c: loc) (d: loc), RET (#a, #b, #c, #d); True }}}.
-  Proof. Admitted.
+  Proof.
+    wp_start.
+    wp_auto.
+  Admitted.
 
   Lemma wp_HashTrieMap__All (ht: loc) :
     {{{ is_pkg_init hashtriemap }}}
