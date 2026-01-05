@@ -1,4 +1,6 @@
+From iris.bi.lib Require Import fixpoint_mono.
 From iris.bi.lib Require Import fractional.
+From New.code.hashtriemap Require Import hashtriemap.
 From New.generatedproof.hashtriemap Require Import hashtriemap.
 From New.proof Require Import sync.
 From New.proof.sync Require Import atomic.
@@ -19,296 +21,234 @@ From New.proof.hashtriemap Require Import aux.
 Open Scope Z_scope.
 
 Section model.
-  Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _} `{!globalsGS Σ} {go_ctx: GoContext}.
+  Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
+           `{!globalsGS Σ, !ghost_varG Σ (gmap w64 w64)} {go_ctx: GoContext}.
 
-  (* Ghost state for the abstract map (auth map from Perennial). *)
-  Definition ht_map_auth `{!mapG Σ w64 w64} (γ: gname) (M: gmap w64 w64) : iProp Σ :=
-    map_ctx γ 1 M.
+  (* pure definitions, mostly hash-related stuff *)
 
-  Definition ht_map_ptsto `{!mapG Σ w64 w64} (γ: gname) (k: w64) (v: w64) : iProp Σ :=
-    ptsto_mut γ k 1 v.
-
-  Definition ht_map_frag `{!mapG Σ w64 w64} (γ: gname) (m: gmap w64 w64) : iProp Σ :=
-    ([∗ map] k ↦ v ∈ m, ht_map_ptsto γ k v).
-
-  (* Ghost names (inspired by sharded_hashmap). *)
-  Record ghost_names := mkNames {
-                            user_name : gname;
-                            map_name : gname;
-                            init_name : gname;
-                          }.
-
-  Definition init_tok `{!ghost_varG Σ bool} (γ: ghost_names) (b: bool) : iProp Σ :=
-    ghost_var γ.(init_name) (DfracOwn (1/2)) b.
-
-  Definition hashtriemap_tok `{!ghost_varG Σ (gmap w64 w64)} (γ: ghost_names) (m: gmap w64 w64) :=
-    ghost_var γ.(user_name) (DfracOwn (1/2)) m.
-
-  Definition hashtriemap_auth `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
-    (γ: ghost_names) (m: gmap w64 w64) : iProp Σ :=
-    ht_map_auth γ.(map_name) m ∗
-                    ghost_var γ.(user_name) (DfracOwn (1/2)) m.
-
-  Definition hashtriemap_sub `{!mapG Σ w64 w64} (γ: ghost_names) (sub_m: gmap w64 w64) : iProp Σ :=
-    ht_map_frag γ.(map_name) sub_m.
-
-  Definition hashtriemap_pre_auth `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
-    (γ: ghost_names) : iProp Σ :=
-    ghost_var γ.(user_name) (DfracOwn (1/2)) (∅: gmap w64 w64) ∗
-                  ht_map_auth γ.(map_name) (∅: gmap w64 w64).
-
-  Lemma hashtriemap_pre_auth_to_auth `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
-    (γ: ghost_names) :
-    hashtriemap_pre_auth γ -∗ hashtriemap_auth γ (∅: gmap w64 w64).
-  Proof.
-    iIntros "[Huser Hmap]".
-    iFrame.
-  Qed.
-
-  (* Concrete representation predicates. These are kept abstract but structured. *)
-  Parameter entry_chain : loc → list (w64 * w64) → Prop.
   Parameter hash_key : w64 → w64.
 
-  (* depth=0 at root, using top bits first (as in Go): idx = (h >> (64-4*(d+1))) & 0xF *)
-  Definition hash_index (h: w64) (depth: nat) : nat :=
-    let shift := 64 - 4 * (Z.of_nat (S depth)) in
-    Z.to_nat (Z.land (Z.shiftr (word.unsigned h) shift) 15).
+  Definition path_to_prefix := foldl (λ acc x, (Z.shiftl acc hashtriemap.nChildrenLog2) + x) 0.
 
-  (* prefix is the top 4*depth bits of h (lower bits zeroed). *)
-  Definition hash_prefix (h: w64) (depth: nat) : w64 :=
-    let shift := 64 - 4 * (Z.of_nat depth) in
-    word.of_Z (Z.shiftl (Z.shiftr (word.unsigned h) shift) shift).
+  (* index is the 4 bits at depth (0-based) of h. *)
 
-  (* extend prefix with the next 4-bit child index at depth+1. *)
-  Definition child_prefix (prefix: w64) (depth idx: nat) : w64 :=
-    let shift := 64 - 4 * (Z.of_nat (S depth)) in
-    word.of_Z (word.unsigned prefix + Z.shiftl (Z.of_nat idx) shift).
+  (* Definition hash_index (h: w64) (depth: nat) : nat := *)
+  (*   let shift := 64 - 4 * (Z.of_nat (S depth)) in *)
+  (*   Z.to_nat (Z.land (Z.shiftr (word.unsigned h) shift) 15). *)
+
+  (* (* prefix is the top 4*depth bits of h (lower bits zeroed). *) *)
+  (* Definition hash_prefix (h: w64) (depth: nat) : w64 := *)
+  (*   let shift := 64 - 4 * (Z.of_nat depth) in *)
+  (*   word.of_Z (Z.shiftl (Z.shiftr (word.unsigned h) shift) shift). *)
+
+  (* (* extend prefix with the next 4-bit child index at depth+1. *) *)
+  (* Definition child_prefix (prefix: w64) (depth idx: nat) : w64 := *)
+  (*   let shift := 64 - 4 * (Z.of_nat (S depth)) in *)
+  (*   word.of_Z (word.unsigned prefix + Z.shiftl (Z.of_nat idx) shift). *)
 
   Definition same_hash (ks: list w64) : Prop :=
     ∀ k1 k2, k1 ∈ ks → k2 ∈ ks → hash_key k1 = hash_key k2.
 
-  Definition entry_model (e: loc) (m: gmap w64 w64) : Prop :=
-    ∃ kvs,
-      entry_chain e kvs ∧
-        m = list_to_map kvs ∧
-        NoDup (map fst kvs) ∧
-        same_hash (map fst kvs).
+  Definition own_hash (path: list Z) (hash: Z) : Prop :=
+    Z.shiftr hash (hashtriemap.hashBits - hashtriemap.nChildrenLog2 * Z.of_nat (length path)) = (path_to_prefix path).
+  
+  (* Ghost state for the hashtriemap. *)
 
-  (* trie_model should encode path/hash routing invariants for prefix/depth. *)
-  Definition maps_union (ms: gmap nat (gmap w64 w64)) : gmap w64 w64 :=
-    map_fold (λ _ m acc, m ∪ acc) ∅ ms.
+  Record ghost_names := mkNames {
+                           map_name : gname;
+                           init_name : gname;
+                         }.
 
-  (* Optional strengthening assumptions/lemmas for later proofs. *)
-  Definition children_disjoint (child_ms: gmap nat (gmap w64 w64)) : Prop :=
-    ∀ i j m1 m2, child_ms !! i = Some m1 → child_ms !! j = Some m2 → i ≠ j → m1 ##ₘ m2.
+  (* both of these are designed to be split between an invariant and a mutex, so that reading can be done outside of the critical section and writing can only be done inside *)
+  Definition init_tok `{!ghost_varG Σ bool} (γ: ghost_names) (b: bool) : iProp Σ :=
+    ghost_var γ.(init_name) (DfracOwn (1/2)) b.
+  
+  Definition map_tok `{!ghost_varG Σ (gmap w64 w64)} (γ: ghost_names) (m: gmap w64 w64) d : iProp Σ :=
+    ghost_var γ.(map_name) d m.
 
-  Lemma maps_union_lookup_disjoint (child_ms: gmap nat (gmap w64 w64)) idx m k v :
-    children_disjoint child_ms →
-    child_ms !! idx = Some m →
-    m !! k = Some v →
-    maps_union child_ms !! k = Some v.
-  Proof.
-    revert idx m k v.
-    induction child_ms as [|i x m' Hnone Hfold IH] using map_fold_fmap_ind.
-    - intros idx m k v Hdisj Hidx Hmk. rewrite lookup_empty in Hidx. congruence.
-    - intros idx m k v Hdisj Hidx Hmk.
-      (* specialize the fold equation for union *)
-      have Hfold' := Hfold (gmap w64 w64) (gmap w64 w64)
-                       (λ _ m acc, m ∪ acc) (λ y, y) ∅ x.
-      simpl in Hfold'. rewrite map_fmap_id in Hfold'. simpl in Hfold'.
-      rewrite /maps_union in Hfold'.
-      specialize (Hfold' _ _).
-      (* split on whether idx is the inserted key *)
-      destruct (decide (idx = i)) as [->|Hneq].
-      + rewrite lookup_insert_eq in Hidx. inversion Hidx. subst m. clear Hidx.
-        rewrite /maps_union. rewrite Hfold'.
-        (* left map wins the union lookup *)
-        by eapply lookup_union_Some_l.
-      + rewrite lookup_insert_ne in Hidx; [|done].
-        rewrite /maps_union. rewrite Hfold'.
-        (* show x does not have key k using disjointness with m *)
-        assert (Hdisj_x : x ##ₘ m).
-        { apply (Hdisj i idx x m); try done.
-          - rewrite lookup_insert_eq. done.
-          - rewrite lookup_insert_ne; done. }
-        assert (Hxnone : x !! k = None).
-        { destruct (x !! k) eqn:Hxk; [|done].
-          exfalso.
-          have Hdisj_spec := map_disjoint_spec x m.
-          rewrite Hdisj_spec in Hdisj_x.
-          apply (Hdisj_x k w v); auto. }
-        rewrite (lookup_union_r _ _ _ Hxnone).
-        (* restrict disjointness to the tail map *)
-        assert (Hdisj_m : children_disjoint m').
-        { intros j1 j2 m1 m2 Hj1 Hj2 Hne.
-          assert (Hj1ne : j1 ≠ i).
-          { intros ->. rewrite Hnone in Hj1. inversion Hj1. }
-          assert (Hj2ne : j2 ≠ i).
-          { intros ->. rewrite Hnone in Hj2. inversion Hj2. }
-          apply (Hdisj j1 j2 m1 m2).
-          - rewrite lookup_insert_ne; [exact Hj1|intro H; apply Hj1ne; symmetry; exact H].
-          - rewrite lookup_insert_ne; [exact Hj2|intro H; apply Hj2ne; symmetry; exact H].
-          - exact Hne. }
-        eapply IH; eauto.
-  Qed.
+  Definition indirect_par node_inv (γ: ghost_names) d (ind: loc) (path: list Z) : iProp Σ :=
+    ∃ (children: list loc),
+      (* ownership of the indirect struct’s children field *)
+      ind ↦s[hashtriemap.indirect :: "children"] children ∗
+      ⌜Z.of_nat (length children) = hashtriemap.nChildren ⌝ ∗
+      (* for each child slot, either empty or a node_inv *)
+      ([∗ list] i ↦ cloc ∈ children,
+         ∃ (nptr: loc),
+           own_Value cloc d (interface.mk (ptrT.id hashtriemap.node.id) #nptr) ∗
+           (⌜ nptr = null ⌝ ∨ node_inv nptr (path ++ [Z.of_nat i]))).
 
-  Definition trie_model (i: loc) (prefix: w64) (depth: nat) (m: gmap w64 w64) : Prop :=
-    (∃ child_ms,
-        m = maps_union child_ms ∧
-          (∀ idx sub_m, child_ms !! idx = Some sub_m →
-                        (∀ k v, sub_m !! k = Some v →
-                                hash_prefix (hash_key k) depth = prefix ∧
-                                  hash_index (hash_key k) depth = idx))) ∧
-      (depth < 16)%nat.
+  Definition entry_recF (γ: ghost_names) d (Φ: loc * gmap w64 w64 → iProp Σ)
+    : loc * gmap w64 w64 → iProp Σ :=
+    λ '(ent,owned_ghost),
+      (if bool_decide (ent = null) then
+        ⌜ owned_ghost = ∅ ⌝
+      else
+        ∃ (k: w64) (v: w64) (overflow: loc) (overflow_loc: loc) (rest: gmap w64 w64),
+          ent ↦s[hashtriemap.entry :: "key"] k ∗
+          ent ↦s[hashtriemap.entry :: "value"] v ∗
+          ent ↦s[hashtriemap.entry :: "overflow"] overflow ∗
+          own_Value overflow d (interface.mk (ptrT.id hashtriemap.entry.id) (# overflow_loc)) ∗
+          ⌜ owned_ghost = <[k := v]> rest ⌝ ∗
+          Φ (overflow_loc, rest))%I.
 
-  Definition child_node (children_vs: list atomic.Value.t)
-    (idx: nat) (n: loc) : Prop :=
-    ∃ av, children_vs !! idx = Some av ∧
-      av = atomic.Value.mk (interface.mk (ptrT.id hashtriemap.node.id) (# n)).
+  Definition entry_rec (γ: ghost_names) (ent: loc) (owned_ghost: gmap w64 w64) d : iProp Σ :=
+    bi_least_fixpoint (entry_recF γ d) (ent, owned_ghost).
 
-  Definition child_nil (children_vs: list atomic.Value.t)
-    (idx: nat) : Prop :=
-    ∃ av, children_vs !! idx = Some av ∧
-      av = atomic.Value.mk (interface.mk (ptrT.id hashtriemap.node.id) (# null)).
+  Definition entry (γ: ghost_names) (e: loc) (path: list Z) d : iProp Σ :=
+    ∃ (owned_ghost: gmap w64 w64),
+      map_tok γ owned_ghost d ∗
+      entry_rec γ e owned_ghost d.
+  
+  Definition nodeF (γ: ghost_names) d
+                   (Φ: loc * list Z → iProp Σ)
+    : loc * list Z → iProp Σ :=
+    λ '(n, path),
+      (
+        ∃ (is_entry: bool),
+          n ↦s[hashtriemap.node :: "isEntry"] is_entry ∗
+          if is_entry
+          then
+            let entry_loc := struct.field_ref_f hashtriemap.node "entry" n in
+            entry γ entry_loc path d
+          else
+            let indirect_loc := struct.field_ref_f hashtriemap.node "indirect" n in
+            indirect_par (curry Φ) γ d indirect_loc path
+      )%I.
 
-  Definition node_is_entry (n e: loc) : iProp Σ :=
-    n ↦s[hashtriemap.node :: "isEntry"] (true) ∗
-      n ↦s[hashtriemap.node :: "ent"] e ∗
-      n ↦s[hashtriemap.node :: "ind"] (null).
+  Definition node (γ: ghost_names) d : loc → list Z → iProp Σ :=
+    λ n path, bi_least_fixpoint (nodeF γ d) (n, path).
 
-  Definition node_is_indirect (n i: loc) : iProp Σ :=
-    n ↦s[hashtriemap.node :: "isEntry"] (false) ∗
-      n ↦s[hashtriemap.node :: "ent"] (null) ∗
-      n ↦s[hashtriemap.node :: "ind"] i.
-
-  Definition node_model (n: loc) (m: gmap w64 w64) : iProp Σ :=
-    (∃ e, node_is_entry n e ∗ ⌜entry_model e m⌝) ∨
-      (∃ i, node_is_indirect n i ∗ ⌜trie_model i 0 0 m⌝).
-
-  Definition children_model
-    (children_vs: list atomic.Value.t)
-    (prefix: w64) (depth: nat)
-    (child_ms: gmap nat (gmap w64 w64)) : iProp Σ :=
-    ∀ (idx: nat),
-      ⌜(idx < 16)%nat⌝ -∗
-      ((∃ sub_m, ⌜child_ms !! idx = Some sub_m⌝ ∗
-          ((∃ n, ⌜child_node children_vs idx n⌝ ∗
-                  ((∃ e, node_is_entry n e ∗ ⌜entry_model e sub_m⌝) ∨
-                     (∃ i, node_is_indirect n i ∗
-                             ⌜trie_model i (child_prefix prefix depth idx) (S depth) sub_m⌝)))
-           ∨ (⌜child_nil children_vs idx⌝ ∗ ⌜sub_m = ∅⌝)))
-       ∨ (⌜child_ms !! idx = None⌝ ∗ ⌜child_nil children_vs idx⌝)).
-
-  Definition entry_rep (e: loc) (m: gmap w64 w64) : iProp Σ :=
-    ⌜entry_model e m⌝.
-
-  Definition node_rep (n: loc) (m: gmap w64 w64) : iProp Σ :=
-    node_model n m.
-
-  Definition indirect_rep (i: loc) (prefix: w64) (depth: nat) (m: gmap w64 w64) : iProp Σ :=
-    ⌜trie_model i prefix depth m⌝.
-
-  (* Per-indirect lock invariant. *)
-  Definition indirect_inv `{!mapG Σ w64 w64} (γ: ghost_names) (i: loc) : iProp Σ :=
-    ∃ (child_ms: gmap nat (gmap w64 w64)) (dead: atomic.Bool.t)
-      (node parent: loc) (children: slice.t) (children_vs: list atomic.Value.t)
-      (prefix: w64) (depth: nat) (M: gmap w64 w64),
-      i ↦s[hashtriemap.indirect :: "node"] node ∗
-        node_is_indirect node i ∗
-        i ↦s[hashtriemap.indirect :: "dead"] dead ∗
-        i ↦s[hashtriemap.indirect :: "parent"] parent ∗
-        i ↦s[hashtriemap.indirect :: "children"] children ∗
-        own_slice children (DfracOwn 1) children_vs ∗
-        children_model children_vs prefix depth child_ms ∗
-        ⌜maps_union child_ms = M⌝ ∗
-        indirect_rep i prefix depth M ∗
-        hashtriemap_sub γ M.
-
-  Definition is_indirect `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
-    (γ: ghost_names) (i: loc) : iProp Σ :=
-    is_Mutex (struct.field_ref_f hashtriemap.indirect "mu" i)
-      (indirect_inv γ i).
+  Definition indirect γ d := indirect_par (node γ d) γ d.
 
   (* Global invariant tying the trie to the abstract map. *)
   Definition ht_inv `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
-    (ht: loc) (γ: ghost_names) : iProp Σ :=
-    ∃ (seed: w64) (i: loc) M,
-      ht ↦s[hashtriemap.HashTrieMap :: "seed"] seed ∗
-        own_Value (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) (DfracOwn 1)
-        (interface.mk (ptrT.id hashtriemap.indirect.id) (# i)) ∗
-        is_indirect γ i ∗
-        hashtriemap_auth γ M.
+                    (ht: loc) (γ: ghost_names) : iProp Σ :=
+    ∃ (i: loc),
+      own_Value (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) 1
+                (interface.mk (ptrT.id hashtriemap.indirect.id) (# i)) ∗
+      indirect γ 1 i [].
 
   (* Public predicate exposed to clients. *)
   Definition mapN         : namespace := nroot .@ "hashtriemap".
   Definition init_statusN : namespace := nroot .@ "hashtriemap.init_status".
 
   Definition is_hashtriemap `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
-    (γ: ghost_names) (ht: loc) : iProp Σ :=
+                            (γ: ghost_names) (ht: loc) : iProp Σ :=
     inv mapN (ht_inv ht γ).
 
   Definition init_status_done
-    `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
-    (γ: ghost_names) (ht: loc) (b: bool) : iProp Σ :=
+               `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64)}
+               (γ: ghost_names) (ht: loc) (b: bool) : iProp Σ :=
     (if b then is_hashtriemap γ ht else True%I).
 
   Definition init_status_inv
-    `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
-    (ht: loc) (γ: ghost_names) : iProp Σ :=
+               `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
+               (ht: loc) (γ: ghost_names) : iProp Σ :=
     ∃ (b: bool),
-      own_Uint32 (struct.field_ref_f hashtriemap.HashTrieMap "inited" ht) (DfracOwn 1)
-        (if b then W32 1 else W32 0) ∗
-        init_tok γ b ∗
-        □ init_status_done γ ht b.
+      own_Uint32 (struct.field_ref_f hashtriemap.HashTrieMap "inited" ht) 1
+                 (if b then W32 1 else W32 0) ∗
+      init_tok γ b ∗
+      □ init_status_done γ ht b.
 
   Definition init_status
-    `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
-    (ht: loc) (γ: ghost_names) : iProp Σ :=
+               `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
+               (ht: loc) (γ: ghost_names) : iProp Σ :=
     inv init_statusN (init_status_inv ht γ).
 
   (* Initialization lock invariant for HashTrieMap. *)
   Definition init_mu_inv `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
-    (ht: loc) (γ: ghost_names) : iProp Σ :=
+                         (ht: loc) (γ: ghost_names) : iProp Σ :=
     ∃ (b: bool),
       if b
       then init_tok γ true
       else (init_tok γ false ∗
-              (∃ (seed: w64),
-                  ht ↦s[hashtriemap.HashTrieMap :: "seed"] seed) ∗
-              own_Value (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) (DfracOwn 1) interface.nil ∗
-              hashtriemap_pre_auth γ)%I.
+            (∃ (seed: w64),
+               ht ↦s[hashtriemap.HashTrieMap :: "seed"] seed) ∗
+            own_Value (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) 1 interface.nil
+           )%I.
 
   Definition init_mu `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
-    (ht: loc) (γ: ghost_names) : iProp Σ :=
+                     (ht: loc) (γ: ghost_names) : iProp Σ :=
     is_Mutex (struct.field_ref_f hashtriemap.HashTrieMap "initMu" ht)
-      (init_mu_inv ht γ).
+             (init_mu_inv ht γ).
 
   Definition hashtriemap_init
-    `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
-    (ht: loc) (γ: ghost_names) : iProp Σ :=
-    init_status ht γ ∗ init_mu ht γ ∗ hashtriemap_tok γ (∅: gmap w64 w64).
+               `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
+               (ht: loc) (γ: ghost_names) : iProp Σ :=
+    init_status ht γ ∗ init_mu ht γ.
 
   Lemma hashtriemap_pre_auth_init
-    `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool} :
-    ⊢ |==> ∃ γ, hashtriemap_pre_auth γ ∗ init_tok γ false ∗ init_tok γ false ∗
-                  hashtriemap_tok γ (∅: gmap w64 w64).
+          `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool} :
+    ⊢ |==> ∃ γ, init_tok γ false ∗ init_tok γ false.
   Proof.
     iMod (ghost_var_alloc (false)) as (init_γ) "[Hinit1 Hinit2]".
-    iMod (ghost_var_alloc (∅ : gmap w64 w64)) as (user_γ) "[Huser Hvar]".
-    iMod (map_init (∅ : gmap w64 w64)) as (map_γ) "Hmap".
+    iMod (ghost_var_alloc (∅ : gmap w64 w64)) as (map_γ) "[Huser Hvar]".
     iModIntro.
-    iExists (mkNames user_γ map_γ init_γ).
+    iExists (mkNames map_γ init_γ).
     iFrame.
   Qed.
 
   Lemma hashtriemap_zero_init
-    `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool, !syncG Σ}
-    (ht: loc) :
-    own_Uint32 (struct.field_ref_f hashtriemap.HashTrieMap "inited" ht) (DfracOwn 1) (W32 0) -∗
-    (struct.field_ref_f hashtriemap.HashTrieMap "initMu" ht) ↦ (default_val sync.Mutex.t) -∗
-    own_Value (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) (DfracOwn 1) interface.nil -∗
-    ht ↦s[hashtriemap.HashTrieMap :: "seed"] (W64 0) -∗
-    |==> ∃ γ, hashtriemap_init ht γ.
-  Proof. Admitted.
+      `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool(* , !syncG Σ *)}
+      (ht: loc) E :
+    ht ↦ default_val hashtriemap.HashTrieMap.t ⊢
+    |={E}=> ∃ γ, hashtriemap_init ht γ.
+  Proof.
+    iIntros "Hht".
+    iDestruct (struct_fields_split with "Hht") as "Hfields".
+    iNamed "Hfields".
+    simpl.
+    iMod (hashtriemap_pre_auth_init) as (γ) "(Htok1 & Htok2)".
+
+    iApply struct_fields_split in "Hinited".
+    iNamed "Hinited".
+    iDestruct (Uint32_unfold with "Hv") as "Hinited".
+    iClear "H_0".
+
+    iApply struct_fields_split in "Hroot".
+    iNamed "Hroot".
+    iDestruct (Value_unfold with "Hv") as "Hroot".
+
+    iMod (inv_alloc init_statusN _ (init_status_inv ht γ) with "[Htok1 Hinited]") as "#Hinit".
+    {
+      iNext.
+      iExists false.
+      iFrame.
+      simpl.
+      iModIntro.
+      done.
+    }
+
+    iAssert (▷ init_mu_inv ht γ)%I with "[Htok2 Hseed Hroot]" as "Hmu_inv".
+    {
+      iNext.
+      iExists false.
+      iFrame "Htok2".
+      iSplitL "Hseed".
+      { iExists (W64 0). iFrame. }
+      iFrame "Hroot".
+    }
+
+    set (m := struct.field_ref_f hashtriemap.HashTrieMap "initMu" ht).
+
+    iAssert (|={E}=> is_Mutex m (init_mu_inv ht γ))%I with "[HinitMu Hmu_inv]" as "Hmutex".
+    {
+      iDestruct (init_Mutex (init_mu_inv ht γ) ⊤ m with "[$]") as "Hmu".
+      iSpecialize ("Hmu" with "Hmu_inv").
+      (* iExact "Hmu". *)
+      (* TODO *)
+      (* Error: Tactic failure: iExact: "Hmu" : (|={⊤}=> is_Mutex m (init_mu_inv ht γ))%I does not match goal. *)
+      (* goal: *)
+      (* |={⊤}=> is_Mutex m (init_mu_inv ht γ) *)
+      (* ????? *)
+      admit.
+    }
+
+    iMod "Hmutex".
+
+    iModIntro.
+    iExists γ.
+    iFrame "Hinit Hmutex".
+  Admitted.
 
 End model.

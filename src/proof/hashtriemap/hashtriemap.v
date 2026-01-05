@@ -16,17 +16,17 @@ Open Scope Z_scope.
 
 Section proof.
   Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
-    `{!globalsGS Σ} {go_ctx: GoContext}
-    `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}.
+           `{!globalsGS Σ} {go_ctx: GoContext}
+           `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}.
 
   #[global] Instance : IsPkgInit hashtriemap := define_is_pkg_init True%I.
   #[global] Instance : GetIsPkgInitWf hashtriemap := build_get_is_pkg_init_wf.
 
-  Lemma wp_newIndirectNode (parent: loc) (γ: ghost_names) (M: gmap w64 w64) :
-    {{{ is_pkg_init hashtriemap ∗ hashtriemap_sub γ M }}}
+  Lemma wp_newIndirectNode (γ: ghost_names) (parent: loc) (path: list Z) :
+    {{{ is_pkg_init hashtriemap }}}
       @! hashtriemap.newIndirectNode #parent
       {{{ (ind: loc), RET (#ind);
-          is_indirect γ ind }}}.
+          indirect γ 1 ind path }}}.
   Proof.
     wp_start as "Hpre".
     wp_auto.
@@ -41,7 +41,7 @@ Section proof.
     wp_auto.
 
     set (children_vs := replicate (sint.nat (W64 hashtriemap.nChildren))
-                          atomic.into_val_typed_Value.(default_val atomic.Value.t)).
+                                  atomic.into_val_typed_Value.(default_val atomic.Value.t)).
 
     (*
       TODO:
@@ -58,7 +58,7 @@ Section proof.
           "%Hlen" :: ⌜length vs = Z.to_nat hashtriemap.nChildren⌝ ∗
           "%Hprefix" :: ⌜∀ (j: nat), j ≥ 0 → j < uint.Z i →
                                      ∃ av, vs !! j = Some av ∧
-					     av = atomic.Value.mk (interface.mk (ptrT.id hashtriemap.node.id) (# null))⌝ ∗
+                                           av = atomic.Value.mk (interface.mk (ptrT.id hashtriemap.node.id) (# null))⌝ ∗
           "%Hsuffix" :: ⌜∀ (j: nat), j >= uint.Z i → j < length vs → vs !! j = children_vs !! j⌝
       )%I with "[$Hchildren $i $idx]" as "IH".
     {
@@ -80,7 +80,6 @@ Section proof.
     2: {
       wp_alloc av_ptr as "av".
 
-      rewrite /is_indirect.
       iApply struct_fields_split in "node".
       iNamed "node".
       iApply struct_fields_split in "av".
@@ -88,7 +87,7 @@ Section proof.
       simpl.
 
       iAssert (
-          indirect_inv γ node
+          indirect γ 1 node path
         )%I as "Hinv".
       {
         (* TODO: whatever this invariant ends up being, need to prove it here with M=∅ *)
@@ -137,7 +136,7 @@ Section proof.
     iDestruct ((own_slice_elem_acc) with "[$Hvs]") as "[Helem Hcont]"; eauto.
     { word. }
 
-    iAssert (own_Value (slice.elem_ref_f children atomic.Value i) (DfracOwn 1) interface.nil)%I
+    iAssert (own_Value (slice.elem_ref_f children atomic.Value i) 1 interface.nil)%I
       with "[Helem]" as "Helem".
     {
       auto.
@@ -162,7 +161,7 @@ Section proof.
 
     wp_for_post.
 
-    iFrame "Hpre HΦ parent ind node".
+    iFrame "HΦ parent ind node".
 
     iFrame.
 
@@ -221,16 +220,15 @@ Section proof.
       word.
   Admitted.			(* only admitted because of the ind invariant needing proof *)
 
-  Lemma wp_HashTrieMap__initSlow (ht: loc) :
+  Lemma wp_HashTrieMap__initSlow (ht: loc) (γ: ghost_names) :
     {{{ is_pkg_init hashtriemap ∗ is_pkg_init atomic ∗ is_pkg_init sync ∗
-          ∃ γ, hashtriemap_init ht γ }}}
+        hashtriemap_init ht γ }}}
       ht @ (ptrT.id hashtriemap.HashTrieMap.id) @ "initSlow" #()
       {{{ RET #();
-          ∃ γ, hashtriemap_init ht γ ∗
-                 is_hashtriemap γ ht }}}.
+          hashtriemap_init ht γ ∗ is_hashtriemap γ ht }}}.
   Proof.
     wp_start as "Hpre".
-    iDestruct "Hpre" as (γ) "(#Hinit & #Hmu & Hht_tok)".
+    iDestruct "Hpre" as "(#Hinit & #Hmu)".
 
     wp_apply wp_with_defer as "%defer defer"; simpl subst.
     wp_auto.
@@ -238,9 +236,6 @@ Section proof.
     wp_apply (wp_Mutex__Lock with "[$Hmu]").
     iIntros "(Hown_mutex&Hmu_inv)".
     wp_auto.
-
-    iAssert (hashtriemap_sub γ (∅: gmap w64 w64))%I as "Hsub".
-    { rewrite /hashtriemap_sub /ht_map_frag big_sepM_empty. iFrame. }
 
     wp_apply wp_Uint32__Load.
     iInv "Hinit" as (b) "(>Hinited & >Hinit_tok & #Hstatus_done)" "Hclose".
@@ -270,8 +265,7 @@ Section proof.
       wp_apply (wp_Mutex__Unlock with "[$Hmu $Hown_mutex $Hmu_inv]").
 
       wp_finish.
-      iExists γ.
-      iFrame "Hinit Hmu Hht_tok".
+      iFrame "Hinit Hmu".
       iExact "Hstatus_done".
     }
 
@@ -291,8 +285,7 @@ Section proof.
     iIntros "_".
     wp_auto.
 
-    wp_apply wp_newIndirectNode.
-    { iFrame "Hsub". }
+    wp_apply (wp_newIndirectNode γ null []).
     iIntros (root_node_ptr) "root_node".
     wp_auto.
 
@@ -306,7 +299,7 @@ Section proof.
     iFrame.
     iExists interface.nil.
 
-    iDestruct "Hmu_inv" as "(Hinit_tok2 & Hseed & Hroot & Hpre_auth)".
+    iDestruct "Hmu_inv" as "(Hinit_tok2 & Hseed & Hroot)".
     iDestruct (ghost_var_agree with "Hinit_tok Hinit_tok2") as %Heq.
     subst b.
 
@@ -355,8 +348,6 @@ Section proof.
 
     iMod (ghost_var_update_halves true with "Hinit_tok Hinit_tok2") as "(Htok1 & Htok2)".
 
-    iDestruct (hashtriemap_pre_auth_to_auth with "Hpre_auth") as "Hauth".
-
     iAssert (ht_inv ht γ)%I with "[$]" as "Hhtinv".
 
     iMod (invariants.inv_alloc mapN _ (ht_inv ht γ) with "[Hhtinv]") as "#His_map".
@@ -374,21 +365,20 @@ Section proof.
 
     wp_apply (wp_Mutex__Unlock with "[$Hmu $Hown_mutex $Hmu_inv_true]").
     wp_finish.
-    iExists γ.
     iFrame.
     iFrame "His_map Hmu Hinit".
   Qed.
 
   (*precondition: either inited is 0 and we call initSlow, or its 1 and we already have the initialization requirements*)
-  Lemma wp_HashTrieMap__initHT (ht: loc) :
+  Lemma wp_HashTrieMap__initHT (ht: loc) (γ: ghost_names) :
     {{{ is_pkg_init hashtriemap ∗ is_pkg_init atomic ∗ is_pkg_init sync ∗
-          ∃ γ, hashtriemap_init ht γ }}}
+        hashtriemap_init ht γ }}}
       ht @ (ptrT.id hashtriemap.HashTrieMap.id) @ "initHT" #()
       {{{ RET #();
-          ∃ γ, hashtriemap_init ht γ ∗ is_hashtriemap γ ht }}}.
+          hashtriemap_init ht γ ∗ is_hashtriemap γ ht }}}.
   Proof.
     wp_start as "Hpre".
-    iDestruct "Hpre" as (γ) "(#Hinit & #Hmu & Hht_tok)".
+    iDestruct "Hpre" as "(#Hinit & #Hmu)".
 
     wp_auto.
 
@@ -411,7 +401,7 @@ Section proof.
     wp_auto.
 
     wp_if_destruct.
-    - wp_apply (wp_HashTrieMap__initSlow with "[Hht_tok]").
+    - wp_apply (wp_HashTrieMap__initSlow).
       { iFrame. iFrame "Hinit Hmu". }
       iIntros.
       wp_finish.
@@ -426,21 +416,16 @@ Section proof.
   Lemma wp_hashInt (key: w64) (seed: w64) :
     {{{ is_pkg_init hashtriemap }}}
       @! hashtriemap.hashInt #key #seed
-      {{{ (a: w64), RET (#a); True }}}.
-  Proof.
-    wp_start.
-    wp_auto.
-    wp_finish.
-  Qed.
+      {{{ (a: w64), RET (#a); ⌜a = hash_key key⌝ }}}.
+  Proof. Admitted.
 
-  Lemma wp_HashTrieMap__Load (ht: loc) (key: w64) :
-    {{{ is_pkg_init hashtriemap }}}
+  (* dont actually need the is_hashtriemap precondition for any of the lemmas because initHT gives it to us *)
+  Lemma wp_HashTrieMap__Load (ht: loc) (key: w64) (γ: ghost_names) :
+    {{{ is_pkg_init hashtriemap ∗ is_pkg_init atomic ∗ is_pkg_init sync ∗
+        hashtriemap_init ht γ }}}
       ht @ (ptrT.id hashtriemap.HashTrieMap.id) @ "Load" #key
-      {{{ (a: w64) (b: bool), RET (#a, #b); True }}}.
-  Proof.
-    wp_start.
-    wp_auto.
-  Admitted.
+      {{{ (v: w64) (ok: bool), RET (#v, #ok); True }}}.
+  Proof. Admitted.
 
   Lemma wp_HashTrieMap__LoadOrStore (ht: loc) (key: w64) (value: w64) :
     {{{ is_pkg_init hashtriemap }}}
@@ -494,10 +479,7 @@ Section proof.
     {{{ is_pkg_init hashtriemap }}}
       ht @ (ptrT.id hashtriemap.HashTrieMap.id) @ "find" #key #hash #checkValue #value
       {{{ (a: loc) (b: w64) (c: loc) (d: loc), RET (#a, #b, #c, #d); True }}}.
-  Proof.
-    wp_start.
-    wp_auto.
-  Admitted.
+  Proof. Admitted.
 
   Lemma wp_HashTrieMap__All (ht: loc) :
     {{{ is_pkg_init hashtriemap }}}
