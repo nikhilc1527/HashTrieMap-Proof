@@ -63,3 +63,7 @@ of HashTrieMap matches with the source material.
 cd hashtriemap
 go test ./hashtriemap
 ```
+
+## References
+
++ [https://link.springer.com/chapter/10.1007/978-3-662-44202-9_9](https://link.springer.com/chapter/10.1007/978-3-662-44202-9_9)

@@ -16,8 +16,11 @@ Open Scope Z_scope.
 
 Section proof.
   Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
-           `{!globalsGS Σ} {go_ctx: GoContext}
-           `{!mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}.
+    `{(* !mapG Σ w64 w64, !ghost_varG Σ (gmap w64 w64),  *)!ghost_varG Σ bool}
+    `{!ghost_varG Σ (gmap w64 w64)}
+    `{!mapG Σ w64 w64}
+    `{!mapG Σ Z (gmap w64 w64)}
+           `{!globalsGS Σ} {go_ctx: GoContext}.
 
   Definition map_get `{!IntoVal V} `{!IntoValTyped V t} (v: option V) : V * bool :=
     (default (default_val V) v, bool_decide (is_Some v)).
@@ -31,11 +34,11 @@ Section proof.
       {{{ (a: w64), RET (#a); ⌜a = hash_key key⌝ }}}.
   Proof. Admitted.
 
-  Lemma wp_newIndirectNode (γ: ghost_names) (parent: loc) (path: list Z) :
+  Lemma wp_newIndirectNode (γ: ghost_names) (parent: loc) (path: list Z) (hm: hash_map) :
     {{{ is_pkg_init hashtriemap }}}
       @! hashtriemap.newIndirectNode #parent
       {{{ (ind: loc), RET (#ind);
-          indirect γ ind path }}}.
+          indirect γ hm ind path }}}.
   Proof.
     wp_start as "Hpre".
     wp_auto.
@@ -97,7 +100,7 @@ Section proof.
       wp_auto.
 
       iAssert (
-          indirect γ ind_struct path
+          indirect γ hm ind_struct path
         )%I as "Hinv".
       {
         (* TODO: whatever this invariant ends up being, need to prove it here with M=∅ *)
@@ -226,7 +229,7 @@ Section proof.
       specialize (Hsuffix Hj_ge_i_Z Hj_lt_len).
       rewrite list_lookup_insert_ne; auto.
       word.
-  Admitted.			(* only admitted because of the ind invariant needing proof *)
+  Admitted.            (* only admitted because of the ind invariant needing proof *)
 
   Lemma wp_HashTrieMap__initSlow (ht: loc) (γ: ghost_names) (* P {Htimeless: ∀ m, Timeless (P m)} *) :
     {{{ is_pkg_init hashtriemap ∗ is_pkg_init atomic ∗ is_pkg_init sync ∗
@@ -293,7 +296,8 @@ Section proof.
     iIntros "_".
     wp_auto.
 
-    wp_apply (wp_newIndirectNode γ null []).
+    (* TODO: have lemma to initialize empty_map, and give the ptsto_mut part to newIndirectNode and the auth_map used for constructing ht_inv below *)
+    wp_apply (wp_newIndirectNode γ null [] ∅).
     iIntros (root_node_ptr) "root_node".
     wp_auto.
 
@@ -356,14 +360,17 @@ Section proof.
 
     iMod (ghost_var_update_halves true with "Hinit_tok Hinit_tok2") as "(Htok1 & Htok2)".
 
-    iAssert (ht_inv ht γ)%I with "[$]" as "Hhtinv".
+    iAssert (ht_inv ht γ)%I (* with "[$]" *) as "Hhtinv".
+    {
+      admit.
+    }
 
     iMod (invariants.inv_alloc mapN _ (
             (*                      ∃ m, *)
             (* "HP" :: P m ∗ *)
             "Hinv" :: ht_inv ht γ
                                ) with "[Hhtinv]") as "#His_map".
-    { iNext. iFrame. }
+    { iNext. iFrame "Hhtinv". }
 
     iMod ("Hclose" with "[Htok1 Hinited His_map]") as "_".
     { iNext. iFrame. iFrame "Hinited". iExact "His_map". }
@@ -379,8 +386,8 @@ Section proof.
     wp_finish.
     iFrame.
     iFrame "His_map Hmu Hinit".
-  Qed.
-  
+  Admitted.
+
   (*precondition: either inited is 0 and we call initSlow, or its 1 and we already have the initialization requirements*)
   Lemma wp_HashTrieMap__initHT (ht: loc) (γ: ghost_names) (* P {Htimeless: ∀ m, Timeless (P m)} *) :
     {{{ is_pkg_init hashtriemap ∗ is_pkg_init atomic ∗ is_pkg_init sync ∗

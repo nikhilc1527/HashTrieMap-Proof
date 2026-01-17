@@ -1,3 +1,4 @@
 [submodule "perennial"]
-	path = perennial
-	url = https://github.com/mit-pdos/perennial.git
+           path = perennial
+           url = https://github.com/mit-pdos/perennial.git
+           ignore = dirty
