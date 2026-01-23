@@ -17,7 +17,7 @@ From Coq Require Import List.
 Import ListNotations.
 Open Scope Z_scope.
 
-From Perennial.goose_lang.lib Require Export atomic.impl.
+(* From Perennial.goose_lang.lib Require Export atomic.impl. *)
 
 Section aux.
   Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
@@ -54,8 +54,16 @@ Section aux.
   Proof.
   Admitted.
 
-  #[global] Instance LoadUint32_Atomic (l:loc) : Atomic StronglyAtomic (atomic.LoadUint32 #l).
-  Proof. apply _. Qed.
+  Lemma wp_Value__Load u dq :
+    ∀ Φ,
+    is_pkg_init atomic -∗
+    (|={⊤,∅}=> ▷ ∃ v, own_Value u dq v ∗ (own_Value u dq v ={∅,⊤}=∗ Φ #v)) -∗
+    WP u @ (ptrT.id atomic.Value.id) @ "Load" #() {{ Φ }}.
+  Proof.
+  Admitted.
+
+  (* #[global] Instance LoadUint32_Atomic (l:loc) : Atomic StronglyAtomic (atomic.LoadUint32 #l). *)
+  (* Proof. apply _. Qed. *)
 
   (* theres probably already something for this but i couldnt find it *)
   Lemma own_slice_len_keep `{!IntoVal V} `{!IntoValTyped V t} (s: slice.t) dq (vs: list V) :

@@ -1,15 +1,16 @@
 From New.generatedproof.hashtriemap Require Import hashtriemap.
+From New.proof.hashtriemap Require Import aux.
 From New.proof.hashtriemap Require Import prelude.
 From New.proof.hashtriemap Require Import model.
-From New.proof.hashtriemap Require Import aux.
 
 From New.proof Require Import sync.
 From New.proof.sync Require Import atomic.
 
 From iris.base_logic.lib Require Import invariants.
 From iris.proofmode Require Import proofmode.
+From New.golang.theory Require Import struct.
 
-From Perennial.goose_lang.lib Require Import atomic.
+(* From Perennial.goose_lang.lib Require Import atomic. *)
 From Perennial.algebra Require Import auth_map ghost_var.
 
 Open Scope Z_scope.
@@ -38,7 +39,7 @@ Section proof.
     {{{ is_pkg_init hashtriemap }}}
       @! hashtriemap.newIndirectNode #parent
       {{{ (ind: loc), RET (#ind);
-          indirect γ hm ind path }}}.
+          indirect γ ind path }}}.
   Proof.
     wp_start as "Hpre".
     wp_auto.
@@ -55,11 +56,6 @@ Section proof.
     set (children_vs := replicate (sint.nat (W64 hashtriemap.nChildren))
                                   atomic.into_val_typed_Value.(default_val atomic.Value.t)).
 
-    (*
-      TODO:
-      This invariant feels wrong because i=idx throughout the loop, but then i=idx+1 at the end of the loop
-      Either this invariant is actually right or the way goose handles slice range for loops is a bit off
-     *)
     iAssert (
         ∃ (vs: list atomic.Value.t) (idx i: w64),
           "Hvs" :: children ↦* vs ∗
@@ -100,11 +96,10 @@ Section proof.
       wp_auto.
 
       iAssert (
-          indirect γ hm ind_struct path
-        )%I as "Hinv".
+          indirect γ ind_struct path
+        )%I with "[Hvs Hnode Hdead Hmu Hparent Hchildren HisEntry Hent Hind]" as "Hinv".
       {
         (* TODO: whatever this invariant ends up being, need to prove it here with M=∅ *)
-        (* iMod (init_Mutex with "Hmu Hinv") as "Hmu_init". *)
         admit.
       }
 
@@ -172,7 +167,7 @@ Section proof.
 
     wp_for_post.
 
-    iFrame "HΦ parent ind ind_struct".
+    iFrame "HΦ ind ind_struct".
 
     iFrame.
 
@@ -430,7 +425,7 @@ Section proof.
       + iFrame "Hinit Hmu".
         iExact "Hstatus_done".
       + exfalso. congruence.
-  Qed.
+    Qed.
 
   (* dont actually need the is_hashtriemap precondition for any of the lemmas because initHT gives it to us *)
   (* Lemma wp_HashTrieMap__Load (ht: loc) (key: w64) (γ: ghost_names) P Q *)
@@ -444,11 +439,190 @@ Section proof.
   (* Proof. *)
   Lemma wp_HashTrieMap__Load (ht: loc) (key: w64) (γ: ghost_names) :
     {{{ is_pkg_init hashtriemap ∗ is_pkg_init atomic ∗ is_pkg_init sync ∗
-        hashtriemap_init ht γ ∗ is_hashtriemap γ ht
+        hashtriemap_init ht γ
     }}}
       ht @ (ptrT.id hashtriemap.HashTrieMap.id) @ "Load" #key
       {{{ (v: w64) (ok: bool), RET (#v, #ok); True }}}.
-  Proof. Admitted.
+  Proof.
+    wp_start as "Hpre".
+    iNamed "Hpre".
+
+    wp_auto.
+
+    wp_apply (wp_HashTrieMap__initHT with "[$]").
+    iIntros "(_ & #His_map)".
+    wp_auto.
+
+    iApply struct_fields_split in "ht".
+    wp_auto.
+
+    wp_apply wp_hashInt.
+    iIntros (hash) "%Hhash".
+
+    wp_auto.
+
+    iApply struct_fields_split in "ht".
+    wp_auto.
+    wp_apply wp_Value__Load.
+    iInv "His_map" as "Hhtinv" "Hclose".
+
+    iApply fupd_mask_intro.
+    { set_solver. }
+    iIntros "Hmask".
+    iNext.
+    iNamed "Hhtinv".
+    iNamed "Hinv".
+    iFrame "Hown_root".
+    iIntros "Hown_root".
+    iMod "Hmask".
+    iMod ("Hclose" with "[$]").
+    iClear "Hmask".
+    iApply fupd_mask_intro.
+    { set_solver. }
+    iIntros "_".
+    wp_auto.
+
+    wp_apply wp_interface_type_assert.
+    { auto. }
+
+    iAssert (∃ (path: path) (shift: w64) (cur: loc),
+                "Hcur" :: i_ptr ↦ cur ∗
+                "%Hpathlen" :: ⌜length path < 16⌝ ∗
+                "#Hi_indirect" :: indirect γ cur path ∗
+                "Hhash_shift" :: hashShift_ptr ↦ shift ∗
+                "%Hshift" :: ⌜shift = sh path⌝
+            (* TODO: add pure condition that *)
+            (*
+(w64_word_instance.(word.and)
+                                 (w64_word_instance.(word.sru) 
+                                    (hash_key key)
+                                    (w64_word_instance.(word.sub) 
+                                       (W64 (sh path))
+                                       (W64 hashtriemap.nChildrenLog2)))
+                                 (W64 hashtriemap.nChildrenMask))
+                                 is next nibble on path to hash_key key
+             *)
+            )%I with ("[$Hroot_indirect $hashShift $i]") as "Hloop_inv".
+    { iSplit; eauto. }
+
+    wp_for "Hloop_inv".
+
+    iClear "Hroot_indirect".
+    rewrite indirect_unfold /indirect_F.
+    iNamed "Hi_indirect".
+    
+    wp_if_destruct.
+    {
+      wp_apply wp_panic.
+      iPureIntro.
+      unfold sh in e.
+      word.
+    }
+
+    iDestruct (own_slice_len with "Hchildren_slice") as "(%Hlen_children_16 & _)".
+    have Hlen_children : sint.Z children_slice.(slice.len_f) = 16.
+    { word. }
+    clear Hlen_children_16.
+
+    wp_pure.
+    {
+      unfold hashtriemap.nChildrenLog2, hashtriemap.nChildrenMask.
+      have Hlen16 : sint.Z children_slice.(slice.len_f) = 16 by word.
+      set (x := w64_word_instance.(word.sru) (hash_key key)
+                                    (w64_word_instance.(word.sub) (W64 (64 - 4 * length path)) (W64 4))).
+      have Hnib_u : 0 ≤ uint.Z (w64_word_instance.(word.and) x (W64 15)) < 16.
+      {
+        rewrite word.unsigned_and_nowrap.
+        change (uint.Z (W64 15)) with 15.
+        change 15 with (Z.ones 4).
+        rewrite Z.land_ones; word.
+      }
+      have Hsint :
+        sint.Z (w64_word_instance.(word.and) x (W64 15)) =
+        uint.Z (w64_word_instance.(word.and) x (W64 15)).
+      { word. }
+      rewrite Hsint.
+      word.
+    }
+
+    unfold hashtriemap.nChildrenMask.
+    unfold hashtriemap.nChildrenLog2.
+    set next_nibble := (w64_word_instance.(word.and)
+                                            (w64_word_instance.(word.sru)
+                                                                 (hash_key key)
+                                                                 (w64_word_instance.(word.sub)
+                                                                                      (W64 (sh path)) 
+                                                                                      (W64 4)))
+                                            (W64 15)).
+    
+    have Hnib_u : 0 ≤ uint.Z next_nibble < 16.
+    {
+      unfold next_nibble.
+      rewrite word.unsigned_and_nowrap.
+      change (uint.Z (W64 15)) with 15.
+      split.
+      - apply Z.land_nonneg.
+        right.
+        word.
+      - change 15 with (Z.ones 4).
+        rewrite Z.land_ones.
+        + apply Z_mod_lt.
+          word.
+        + word.
+    }
+
+    have Hlt_nat : (sint.nat next_nibble < length children_vals)%nat by
+                     (rewrite Hchildren_len; word).
+    destruct (lookup_lt_is_Some_2 children_vals (sint.nat next_nibble) Hlt_nat)
+      as [v Hv].
+
+    wp_pures.
+    wp_apply wp_Value__Load.
+    iInv "Hind_inv" as "HI" "Hclose_ind".
+    iApply fupd_mask_intro.
+    { set_solver. }
+    iIntros "Hmask".
+    iNext.
+
+    iEval (unfold childrenP) in "HI".
+
+    iNamed "HI".
+
+    iDestruct (big_sepL_lookup_acc with "Hchildren") as "[Hchild Hchildren_close]".
+    { exact Hv. }
+    iNamed "Hchild".
+    iExists (interface.mk (ptrT.id hashtriemap.node.id) (# nodeptr)).
+
+    replace (W64 (sint.nat next_nibble)) with next_nibble by word.
+    iFrame "Hown_child".
+    iIntros "Hown_child".
+    iDestruct ("Hchildren_close" with "[Hown_child Hchild]") as "Hchildren".
+    { iExists nodeptr. iFrame. }
+
+    iMod "Hmask" as "_".
+
+    iMod ("Hclose_ind" with "Hchildren") as "_".
+
+    iApply fupd_mask_intro.
+    { set_solver. }
+    iIntros "_".
+
+    wp_apply wp_interface_type_assert.
+    { auto. }
+
+    wp_if_destruct.
+    {
+      wp_bind.
+      wp_alloc d_ptr as "d_ptr".
+      wp_auto.
+      wp_for_post.
+      admit.
+      (* wp_finish *)
+      (* need to figure out specs *)
+    }
+    iApply struct_fields_split in "n".
+    wp_auto.
+  Admitted.
 
   Lemma wp_HashTrieMap__LoadOrStore (ht: loc) (key: w64) (value: w64) :
     {{{ is_pkg_init hashtriemap }}}
