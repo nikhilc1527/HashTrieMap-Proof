@@ -15,13 +15,3 @@
 # Iris-disabled warnings
 -arg -w -arg -notation-overridden,-redundant-canonical-projection,-notation-incompatible-prefix
 -arg -w -arg -unknown-warning
-
-# goose ouputs
-# -Q src/proof New.proof
-# -Q src/generatedproof New.generatedproof
-# -Q src/code New.code
-
-# perennial
-# -Q perennial/src Perennial
-# -Q perennial/new New
-# -Q perennial/external/Goose Goose

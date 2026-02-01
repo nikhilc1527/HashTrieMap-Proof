@@ -1,5 +1,5 @@
 SRC_DIRS := 'src'
-PROJ_VFILES := $(shell find $(SRC_DIRS) -type f -name "*.v" ! -name "*__nobuild.v")
+PROJ_VFILES = $(shell find $(SRC_DIRS) -type f -name "*.v" ! -name "*__nobuild.v")
 GOOSE_CONFIG_FILES := $(shell find src -type f -name "*.v.toml" ! -name "*__nobuild.v")
 GO_DIR := 'hashtriemap'
 GO_FILES := $(shell find $(GO_DIR) -name "*.go")
@@ -22,7 +22,7 @@ vok: $(PROJ_VFILES:.v=.vok)
 
 .goose-output: $(GO_FILES) $(GOOSE_CONFIG_FILES) goose.toml
 	@echo "GOOSE"
-	$(Q)perennial-cli goose
+	$(Q)go tool perennial-cli goose
 	@touch $@
 
 .rocqdeps.d: $(PROJ_VFILES) _RocqProject .goose-output
@@ -59,6 +59,7 @@ clean:
 	done
 	$(Q)rm -f .goose-output
 	$(Q)rm -f .rocqdeps.d
+	$(Q)rm -rf src/code src/generatedproof
 
 .PHONY: default
 .DELETE_ON_ERROR:
