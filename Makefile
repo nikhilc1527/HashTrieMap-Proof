@@ -1,6 +1,6 @@
 SRC_DIRS := 'src'
-PROJ_VFILES := $(shell fd -I -H -e v -E '*__nobuild.v' . $(SRC_DIRS))
-GOOSE_CONFIG_FILES := $(shell fd -I -H -e "v.toml" -E '*__nobuild.v' . src)
+PROJ_VFILES := $(shell find $(SRC_DIRS) -type f -name "*.v" ! -name "*__nobuild.v")
+GOOSE_CONFIG_FILES := $(shell find src -type f -name "*.v.toml" ! -name "*__nobuild.v")
 GO_DIR := 'hashtriemap'
 GO_FILES := $(shell find $(GO_DIR) -name "*.go")
 
@@ -25,14 +25,13 @@ vok: $(PROJ_VFILES:.v=.vok)
 	$(Q)perennial-cli goose
 	@touch $@
 
-# UNCOMMENT THIS SECTION (AND COMMENT OUT THE NEXT ONE) IF YOU DONT HAVE XONSH INSTALLED
-# .rocqdeps.d: $(PROJ_VFILES) _RocqProject .goose-output
-# 	@echo "ROCQ dep $@"
-# 	$(Q)rocq dep $(ROCQ_DEP_ARGS) -vos -f _RocqProject $(PROJ_VFILES) > $@
-
 .rocqdeps.d: $(PROJ_VFILES) _RocqProject .goose-output
 	@echo "ROCQ dep $@"
-	$(Q)./build_deps.xsh $(ROCQ_DEP_ARGS) -vos -f _RocqProject -- $(PROJ_VFILES) > $@
+	$(Q)rocq dep $(ROCQ_DEP_ARGS) -vos -f _RocqProject $(PROJ_VFILES) > $@
+
+# .rocqdeps.d: $(PROJ_VFILES) _RocqProject .goose-output
+# 	@echo "ROCQ dep $@"
+# 	$(Q)./build_deps.xsh $(ROCQ_DEP_ARGS) -vos -f _RocqProject -- $(PROJ_VFILES) > $@
 
 # do not try to build dependencies if cleaning
 ifeq ($(filter clean,$(MAKECMDGOALS)),)

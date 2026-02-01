@@ -53,7 +53,7 @@ Build proofs:
    ```sh
    make
    ```
-relies on having perennial-cli installed
+relies on having `perennial-cli` installed.
 
 ## Tests
 A small Go test exists at `hashtriemap/hashtriemap/hashtriemap_test.go` to sanity-check
