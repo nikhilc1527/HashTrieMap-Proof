@@ -13,6 +13,7 @@ require (
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/goose-lang/goose v0.10.0 // indirect
+	github.com/goose-lang/goose/testdata/examples v0.0.0-20260114144019-e2b3e17e95c7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

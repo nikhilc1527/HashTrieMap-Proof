@@ -1,35 +1,22 @@
-From Corelib.Program Require Wf.
-From Coq Require Recdef.
-From iris.bi Require Export bi.
-From iris.proofmode Require Import proofmode.
-From iris.prelude Require Import options.
-From iris.bi.lib Require Import fixpoint_mono.
 From iris.bi.lib Require Import fractional.
+
 From New.code.hashtriemap Require Import hashtriemap.
 From New.generatedproof.hashtriemap Require Import hashtriemap.
-From New.proof Require Import sync.
-From New.proof.sync Require Import atomic.
-From New.proof.sync_proof Require Import mutex.
+
+From New.proof Require Import atomic mutex.
+
 From Perennial.algebra Require Import auth_map.
-From Perennial.algebra Require Import ghost_var.
-From Perennial.Helpers Require Import NamedProps.
-Export named_props_ascii_notation.
-From Perennial.Helpers.Word Require Import Integers.
-From coqutil.Word Require Import Interface.
-From iris.algebra Require Import gmap.
 From Perennial.base_logic.lib Require Import invariants.
-From iris.algebra Require Import dfrac.
-From stdpp Require Import gmap list fin_maps.
-From Coq Require Import List.
-Import ListNotations.
+From Perennial.Helpers Require Import NamedProps.
+Import named_props_ascii_notation.
+From Perennial.algebra Require Import ghost_var.
+
 From New.proof.hashtriemap Require Import aux.
+From New.proof.hashtriemap Require Export paths.
+
 Open Scope Z_scope.
 
 Section model.
-  Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
-    `{!globalsGS Σ, !ghost_varG Σ (gmap w64 w64)}
-    {go_ctx: GoContext}.
-
   (* namespace definitions *)
   Definition mapN         : namespace := nroot .@ "hashtriemap".
   Definition init_statusN : namespace := nroot .@ "hashtriemap.init_status".
@@ -48,350 +35,11 @@ Section model.
   Definition V : Type := w64.
   Definition hashT : Type := w64.
 
-  Context `{!mapG Σ K V}
-    `{!mapG Σ Z (gmap K V)}.
-
-  Definition nibble : Type := Z.
-  Definition nibble_list : list nibble :=
-    seqZ 0 16.
-  Definition path : Type := list nibble.
-  Definition domain : Type := list Z.
-
-  Definition full_domain : domain :=
-    seqZ 0 (2^64).
-
-  Global Opaque full_domain.
-
-  Definition path_to_prefix := foldl (λ acc x, acc ≪ 4 + x) 0.
-
-  (* free bits *)
-  Definition sh (p : path) : Z :=
-    64 - 4 * length p.
-
-  Definition lo (p : path) : Z := (path_to_prefix p)     ≪ sh p.
-  Definition hi (p : path) : Z := (path_to_prefix p + 1) ≪ sh p.
-
-  Definition belongs_to_path p k :=
-    k ≫ sh p = path_to_prefix p.
-
-  #[global] Instance belongs_to_path_dec p k : Decision (belongs_to_path p k).
-  Proof.
-    unfold belongs_to_path.
-    apply _.
-  Qed.
-
-  Definition path_to_domain (p : path) : domain :=
-    base.filter
-      (belongs_to_path p)
-      (full_domain).
-
-  Lemma path_to_prefix_snoc (p : path) (n : nibble) :
-    path_to_prefix (p ++ [n]) =
-    ((path_to_prefix p) ≪ 4) + n.
-  Proof.
-    unfold path_to_prefix.
-    (* use foldl_app; stdpp has foldl_app, otherwise prove it *)
-    rewrite foldl_app.
-    simpl.
-    reflexivity.
-  Qed.
-
-  (* (* TODO: replace all the 4's with hashtriemap.nChildrenLog2, 16 with hashtriemap.nChildren *) *)
-
-  Lemma sh_snoc (p : path) (n : nibble) :
-    sh (p ++ [n]) = sh p - 4.
-  Proof.
-    unfold sh.
-    rewrite app_length /=.
-    lia.
-  Qed.
-
-  Lemma sh_nonneg (p : path) :
-    (Z.of_nat (length p) < 64 `div` 4)%Z ->
-    0 ≤ sh p.
-  Proof.
-    unfold sh.
-    word.
-  Qed.
-
-  Lemma shiftr_eq_iff_interval (p : path) (u : Z) :
-    0 ≤ sh p ->
-    0 ≤ u ->
-    (u ≫ (sh p) = path_to_prefix p) ↔ (lo p ≤ u < hi p).
-  Proof.
-    intros Hsh_nonneg Hu_nonneg.
-    repeat unfold lo, hi in *.
-    set (pp := path_to_prefix p) in *.
-    set (s := sh p) in *.
-    repeat rewrite Z.shiftr_div_pow2; try word.
-    repeat rewrite Z.shiftl_mul_pow2; try word.
-    set (b := 2 ^ s) in *.
-    have Hbne : b > 0.
-    { unfold b. word. }
-
-    split.
-    - intro H.
-      rewrite (Z.div_mod u b).
-      2: { word. }
-      rewrite H.
-      split.
-      + word.
-      + have Hmod : 0 <= u mod b < b by apply Z.mod_pos_bound; lia.
-        lia.
-    - intros [Hlo Hhi].
-      have H : (pp = u `div` b ↔ u `div` b = pp) by word.
-      rewrite -H.
-      apply (Z.div_unique u b pp (u - pp*b)).
-      + lia.
-      + have : 0 <= u - pp*b < b by lia.
-        word.
-  Qed.
-
-  Lemma interval_split (p : path) (n : Z) :
-    4 ≤ sh p ->
-    lo (p ++ [n]) = lo p + n * (2 ^ (sh p - 4)).
-  Proof.
-    (* expand lo, use path_to_prefix_snoc + sh_snoc + shiftl algebra *)
-    intros Hsh_nonneg.
-    unfold lo.
-    rewrite path_to_prefix_snoc.
-    rewrite sh_snoc.
-    simpl.
-    repeat rewrite Z.shiftl_mul_pow2; try word.
-    rewrite Z.mul_add_distr_r.
-    have Hpow : 2 ^ 4 * 2 ^ (sh p - 4) = 2 ^ (sh p).
-    {
-      rewrite -Z.pow_add_r; try word.
-      simpl.
-      have H : 4 + (sh p - 4) = sh p by word.
-      rewrite H.
-      reflexivity.
-    }
-    replace (path_to_prefix p * 2 ^ 4 * 2 ^ (sh p - 4) + n * 2 ^ (sh p - 4)) with (path_to_prefix p * 2 ^ sh p + n * 2 ^ (sh p - 4)) by word.
-    done.
-  Qed.
-
-  Lemma interval_consecutive (p : path) (n : Z) :
-    4 ≤ sh p ->
-    hi (p ++ [n]) = lo (p ++ [n+1]).
-  Proof.
-    intros Hsh_nonneg.
-    repeat unfold hi, lo in *.
-    repeat rewrite path_to_prefix_snoc.
-    repeat rewrite sh_snoc.
-    have H : path_to_prefix p ≪ 4 + n + 1 = path_to_prefix p ≪ 4 + (n + 1) by lia.
-    rewrite H.
-    reflexivity.
-  Qed.
-
-  Lemma full_domain_elem (k : w64) :
-    uint.Z k ∈ full_domain.
-  Proof.
-    Local Transparent full_domain.
-    unfold full_domain.
-    apply elem_of_seqZ; word.
-  Qed.
-
-  Lemma path_to_domain_elem (p : path) (k : Z) :
-    k ∈ full_domain →
-    k ∈ path_to_domain p ↔ k ≫ sh p = path_to_prefix p.
-  Proof.
-    intro Hk.
-    unfold path_to_domain.
-    rewrite list_elem_of_filter.
-    split; intro H.
-    - destruct H as [Hk' Hpred].
-      exact Hk'.
-    - split; done.
-  Qed.
-
-  Lemma nibble_list_range (n : Z) :
-    n ∈ nibble_list ↔ 0 ≤ n < 16.
-  Proof.
-    apply elem_of_seqZ.
-  Qed.
-
-  Lemma next_nibble_exists (p : path) (k : Z) :
-    0 ≤ k →
-    length p < 16 ->
-    belongs_to_path p k ->
-    ∃ n, 0 ≤ n < 16 ∧ belongs_to_path (p ++ [n]) k.
-  Proof.
-    intros Hk Hlen Hbelong.
-    unfold belongs_to_path in *.
-    unfold lo, hi in *.
-    set (s := sh p) in *.
-    set (pp := path_to_prefix p) in *.
-    have Hinterval : pp ≪ s ≤ k < (pp + 1) ≪ s.
-    {
-      apply shiftr_eq_iff_interval; [|word|word].
-      unfold sh.
-      word.
-    }
-    set (n := Z.land (k ≫ (s - 4)) (Z.ones 4)).
-    exists n.
-    split.
-    - (* show 0 ≤ n < 16 *)
-      unfold n.
-      set (x := k ≫ (s - 4)).
-      have Hland : Z.land x 15 = x mod 2^4.
-      { change 15 with (Z.ones 4) in *. rewrite Z.land_ones; auto. word. }
-      rewrite Hland. apply Z.mod_pos_bound.
-      word.
-    - (* show belongs_to_path (p ++ [n]) k *)
-      unfold belongs_to_path.
-      have Hs : 4 ≤ sh p.
-      {
-        unfold sh.
-        word.
-      }
-      replace (sh (p ++ [n])) with (s - 4) by (rewrite sh_snoc; word).
-      rewrite path_to_prefix_snoc.
-      set (x := k ≫ (s-4)).
-      assert (Hxmod : x mod 16 = n).
-      {
-        subst x n. change 16 with (2^4).
-        rewrite Z.land_ones; try word.
-      }
-      assert (Hxdiv : x / 16 = pp).
-      {
-        subst x.
-        rewrite Z.shiftr_div_pow2; [|word].
-        rewrite Z.shiftr_div_pow2 in Hbelong; [|word].
-        rewrite Z.pow_sub_r; try word.
-        rewrite -Hbelong.
-        replace (2^4) with 16 by word.
-        set (x := 2^s).
-        have Hxge16 : (16 ≤ x).
-        {
-          unfold x, s.
-          change (16 ≤ 2 ^ sh p) with (2 ^ 4 ≤ 2 ^ (sh p)).
-          apply Z.pow_le_mono_r; lia.
-        }
-        rewrite Z.div_div; [|word|word].
-        have Hx : x mod 16 = 0.
-        {
-          unfold x.
-          have Ht : s mod 4 = 0 by (unfold s, sh; word).
-          have Hdiv : Z.divide 4 s.
-          { apply Z.mod_divide; lia. }
-          destruct Hdiv as [y Hy].
-          replace (y * 4) with (4 * y) in Hy by word.
-          rewrite Hy.
-          rewrite Z.pow_mul_r; [|word|word].
-          replace (2^4) with 16 by word.
-          have Hypos : 1 ≤ y by lia.
-          have Hdiv : Z.divide 16 (16 ^ y).
-          {
-            exists (16 ^ (y - 1)).
-            replace y with (y - 1 + 1) by lia.
-            rewrite Z.pow_succ_r; [|word].
-            simpl.
-            replace (y - 1 + 1 - 1) with (y - 1) by word.
-            word.
-          }
-          rewrite Z.mod_divide; [|word].
-          exact Hdiv.
-        }
-        replace (x / 16 * 16) with (x) by word.
-        reflexivity.
-      }
-      have Hx : x = pp * 16 + n.
-      {
-        rewrite (Z.div_mod x 16); word.
-      }
-      change 16 with (2^4) in Hx.
-      rewrite -Z.shiftl_mul_pow2 in Hx; try word.
-      exact Hx.
-  Qed.
-
-  Lemma next_nibble_unique (p : path) (k : Z) n1 n2 :
-    belongs_to_path (p ++ [n1]) k ->
-    belongs_to_path (p ++ [n2]) k ->
-    n1 = n2.
-  Proof.
-    intros H1 H2.
-    unfold belongs_to_path in *.
-    have Hlen : sh (p ++ [n1]) = sh (p ++ [n2]) by
-                                   rewrite !sh_snoc; lia.
-    rewrite Hlen in H1.
-    (* now both equal the same LHS *)
-    have Hpref : path_to_prefix (p ++ [n1]) = path_to_prefix (p ++ [n2]) by
-                                                etrans; [symmetry; exact H1| exact H2].
-    rewrite !path_to_prefix_snoc in Hpref.
-    word.
-  Qed.
-
-  Lemma next_nibble_extend
-    (p: path) (k: Z) (n: Z) :
-    0 ≤ k →
-    length p < 16 →
-    belongs_to_path p k →
-    n = Z.land (k ≫ (sh p - 4)) 15 →
-    belongs_to_path (p ++ [n]) k.
-  Proof.
-    intros Hk Hlen Hbelong Hn.
-    unfold belongs_to_path.
-    rewrite sh_snoc.
-    rewrite path_to_prefix_snoc.
-    set x := k ≫ (sh p - 4).
-    have Hx : x = (x / 16) * 16 + (x mod 16).
-    { rewrite (Z.div_mod x 16); word. }
-
-    have Hdiv : x ≫ 4 = path_to_prefix p.
-    {
-      unfold x.
-      replace ((k ≫ (sh p - 4)) ≫ 4) with (k ≫ sh p).
-      - exact Hbelong.
-      - symmetry.
-        rewrite Z.shiftr_shiftr; [|lia].
-        replace (sh p - 4 + 4) with (sh p) by lia.
-        reflexivity.
-    }
-    have Hmod : x mod 16 = n.
-    {
-      subst n.
-      change 15 with (Z.ones 4).
-      symmetry.
-      rewrite Z.land_ones; [|lia].
-      reflexivity.
-    }
-
-    rewrite Hx.
-    rewrite Hmod.
-    have Hdiv' : x `div` 16 = path_to_prefix p.
-    {
-      change 16 with (2^4).
-      rewrite <- Z.shiftr_div_pow2; [|lia].
-      rewrite Hdiv.
-      reflexivity.
-    }
-    rewrite Hdiv'.
-    rewrite Z.shiftl_mul_pow2; [|lia].
-    change (2^4) with 16.
-    reflexivity.
-  Qed.
-
-  (* Lemma path_to_domain_split (p : path) : *)
-  (*   length p < 16 ->            (* length p < (sizeof hashT) / nChildrenLog2 *) *)
-  (*   path_to_domain p = *)
-  (*   concat (map (λ n, path_to_domain (p ++ [n])) nibble_list). *)
-  (* Proof. *)
-  (*   intro Hlen. *)
-  (*   apply list_eq. intros. *)
-  (*   apply option_eq; intro k. *)
-  (*   split; intro H. *)
-  (*   - (* → *) *)
-  (*     apply list_elem_of_lookup_2 in H. *)
-  (*     rewrite list_elem_of_filter in H. *)
-  (*     destruct H as [Hbelong Hfull]. *)
-  (*     (* Hfull: k ∈ full_domain *) *)
-  (*     rewrite elem_of_seqZ in Hfull. *)
-  (*     have Hk_nonneg : 0 ≤ k := proj1 Hfull. *)
-  (*     destruct (next_nibble_exists p k) as [x [Hnrange Hbelongn]]; *)
-  (*       try done. *)
-  (*     set (l := concat (map (λ n : nibble, path_to_domain (p ++ [n])) nibble_list)). *)
-  (* Admitted. *)
+  Context `{hG: heapGS Σ, !ffi_semantics _ _}
+    `{!globalsGS Σ, !ghost_varG Σ (gmap w64 w64)}
+    `{!mapG Σ K V}
+    `{!mapG Σ Z (gmap K V)}
+    {go_ctx: GoContext}.
 
   Definition hash_map : Type := gmap Z (gmap K V). (* TODO: should be gmap hashT (gmap K V), its just Z for now to make the above helper lemmas easier *)
 
@@ -404,9 +52,13 @@ Section model.
     (γ : gname) (q: Qp) (dom : domain) (f: Z → gmap K V) : iProp Σ :=
     [∗ list] hash ∈ dom, ptsto_mut γ hash q (f hash).
 
+  Global Opaque own_domain.
+
   Definition own_path
     (γ : gname) (q: Qp) (p : path) (f: Z → gmap K V) : iProp Σ :=
     own_domain γ q (path_to_domain p) f.
+
+  Global Opaque own_path.
 
   (* Constant function: all hashes map to empty *)
   Definition empty_map_fn : Z → gmap K V := λ _, ∅.
@@ -415,27 +67,262 @@ Section model.
   Definition singleton_map_fn (h: Z) (m: gmap K V) : Z → gmap K V :=
     λ h', if decide (h' = h) then m else ∅.
 
-  Definition entry_step
-    (γ: ghost_names) (q: Qp)
-    (e: loc) (path: path) : iProp Σ :=
-    ∃ (k: K) (v: V) (h: Z) rest_map,
-      "#Hk" :: e ↦s[hashtriemap.entry :: "key"]□ k ∗
-      "#Hv" :: e ↦s[hashtriemap.entry :: "value"]□ v ∗
-      "%Hhash" :: ⌜uint.Z (hash_key k) = h⌝ ∗
-      "%Hbelongs" :: ⌜belongs_to_path path h⌝ ∗
-      "Hown_path" :: own_path γ.(map_name) q path (singleton_map_fn h (<[k:=v]> rest_map)).
+  Definition flatten (hm: hash_map) : gmap K V :=
+    map_fold (λ (_: Z) (sub: gmap K V) (acc: gmap K V), sub ∪ acc) ∅ hm.
+
+  Lemma own_path_lookup γ q path h f :
+    h ∈ path_to_domain path →
+    own_path γ q path f -∗
+    ptsto_mut γ h q (f h) ∗ (ptsto_mut γ h q (f h) -∗ own_path γ q path f).
+  Proof.
+    iIntros (Hdom) "Hpath".
+    Local Transparent own_path.
+    Local Transparent own_domain.
+    unfold own_path, own_domain.
+    iDestruct (big_sepL_elem_of_acc with "Hpath") as "[Hptsto Hclose]"; [exact Hdom|].
+    iSplitL "Hptsto".
+    - iExact "Hptsto".
+    - iIntros "Hptsto".
+      iApply "Hclose".
+      iExact "Hptsto".
+  Qed.
+
+  Lemma buckets_disjoint
+    (hm : gmap Z (gmap K V))
+    (Hbuckets_rev : ∀ h sub k v,
+       hm !! h = Some sub →
+       sub !! k = Some v →
+       uint.Z (hash_key k) = h) :
+    ∀ h1 h2 sub1 sub2,
+    hm !! h1 = Some sub1 →
+    hm !! h2 = Some sub2 →
+    h1 ≠ h2 →
+    sub1 ##ₘ sub2.
+  Proof.
+    intros h1 h2 sub1 sub2 H1 H2 Hneq.
+    apply map_disjoint_spec; intros k v1 v2 Hk1 Hk2.
+    have Hh1 : uint.Z (hash_key k) = h1 :=
+      Hbuckets_rev _ _ _ _ H1 Hk1.
+    have Hh2 : uint.Z (hash_key k) = h2 :=
+      Hbuckets_rev _ _ _ _ H2 Hk2.
+    congruence.
+  Qed.
+
+  Lemma flatten_update_update
+    hm h k v old :
+    hm !! h = Some old →
+    uint.Z (hash_key k) = h →
+    (∀ h0 sub k v, hm !! h0 = Some sub → sub !! k = Some v → uint.Z (hash_key k) = h0) →
+    flatten (<[h:=<[k:=v]> old]> hm) = <[k:=v]> (flatten hm).
+  Proof.
+    intros Hh Hhash Hbuckets_rev.
+
+    have Hhm_eq : hm = <[h:=old]> (delete h hm).
+    {
+      apply map_eq; intro h0.
+      destruct (decide (h0 = h)) as [->|Hneq].
+      - rewrite lookup_insert lookup_delete_eq Hh. rewrite decide_True; reflexivity.
+      - rewrite lookup_insert_ne; [|done].
+        rewrite lookup_delete_ne; [|done].
+        reflexivity.
+    }
+
+    rewrite Hhm_eq.
+    rewrite insert_insert.
+
+    unfold flatten.
+    rewrite map_fold_insert_L; [| |rewrite lookup_delete_eq; reflexivity].
+    2: {
+      intros.
+      rewrite map_union_assoc.
+      symmetry.
+      rewrite map_union_assoc.
+      replace (z2 ∪ z1) with (z1 ∪ z2); [reflexivity|].
+      apply map_union_comm.
+
+      have H0' : hm !! j1 = Some z1 by rewrite -Hhm_eq in H0; exact H0.
+      have H1' : hm !! j2 = Some z2 by rewrite -Hhm_eq in H1; exact H1.
+      eapply buckets_disjoint; eauto.
+    }
+
+    rewrite decide_True; [|reflexivity].
+
+    rewrite map_fold_insert_L; [| |rewrite lookup_delete_eq; reflexivity].
+    2: {
+      intros.
+      rewrite map_union_assoc.
+      symmetry.
+      rewrite map_union_assoc.
+      replace (z2 ∪ z1) with (z1 ∪ z2); [reflexivity|].
+      apply map_union_comm.
+
+      set (hm'' := <[h:=<[k:=v]> old]> (delete h hm)).
+      have Hbuckets_rev' :
+        ∀ h0 sub k0 v0,
+        hm'' !! h0 = Some sub →
+        sub !! k0 = Some v0 →
+        uint.Z (hash_key k0) = h0.
+      {
+        intros h0 sub k0 v0 Hlook Hsub.
+        destruct (decide (h0 = h)) as [->|Hneq].
+        - rewrite lookup_insert in Hlook.
+          rewrite decide_True in Hlook; [|reflexivity].
+          inversion Hlook; subst sub.
+          destruct (decide (k0 = k)) as [->|Hk].
+          + exact Hhash.
+          + have Hold : old !! k0 = Some v0 by rewrite lookup_insert_ne in Hsub; [exact Hsub|symmetry; exact Hk].
+            have Hh_old : uint.Z (hash_key k0) = h :=
+              Hbuckets_rev _ _ _ _ Hh Hold.
+            exact Hh_old.
+        - rewrite lookup_insert_ne in Hlook; [|symmetry; exact Hneq].
+          eapply Hbuckets_rev; eauto.
+          apply lookup_delete_Some in Hlook as [_ Hhm].
+          exact Hhm.
+      }
+
+      have H0' : hm'' !! j1 = Some z1 := H0.
+      have H1' : hm'' !! j2 = Some z2 := H1.
+      eapply buckets_disjoint; eauto.
+    }
+
+    apply map_eq; intro k'.
+    destruct (decide (k' = k)) as [->|Hk].
+    - rewrite lookup_insert.
+      rewrite lookup_union.
+      rewrite lookup_insert.
+      rewrite decide_True; [|reflexivity].
+      rewrite decide_True; [|reflexivity].
+      apply union_Some_l.
+    - rewrite lookup_insert_ne; [|done].
+      rewrite lookup_union.
+      rewrite lookup_insert_ne; [|done].
+      change (map_fold (λ (_ : Z) (sub acc : gmap K V), sub ∪ acc) ∅ (delete h hm)) with (flatten (delete h hm)).
+      rewrite lookup_union.
+      reflexivity.
+  Qed.
+
+  Lemma dom_no_dup p : NoDup (path_to_domain p).
+  Proof.
+    unfold path_to_domain.
+    apply NoDup_filter.
+    Local Transparent full_domain.
+    unfold full_domain.
+    apply NoDup_seqZ.
+  Qed.
+
+  Lemma own_path_update_key key value γ hm path f :
+    let h  := uint.Z (hash_key key) in
+    let f' := (λ h', if decide (h' = h) then <[key:=value]>(f h) else f h') in
+    let hm' := <[h := f' h]> hm in
+    belongs_to_path path h →
+    "Hctx" ∷ map_ctx γ.(map_name) 1 hm -∗
+    "Hpath" ∷ own_path γ.(map_name) 1 path f ==∗
+    "Hctx" ∷ map_ctx γ.(map_name) 1 hm' ∗
+    "Hpath" ∷ own_path γ.(map_name) 1 path f'.
+  Proof.
+    intros ? ? ? Hbelongs.
+    iIntros "? ?".
+    iNamed.
+    rewrite /named.
+    subst hm'.
+    have Hdom : h ∈ path_to_domain path
+                  by apply (path_to_domain_elem _ _);
+      [apply full_domain_elem|exact Hbelongs].
+    Local Transparent own_path.
+    unfold own_path.
+    set (dom := path_to_domain path) in *.
+    have Hnodup : NoDup dom.
+    { apply dom_no_dup. }
+    iInduction dom as [|h' dom] "IH".
+    { rewrite elem_of_nil in Hdom. done. }
+    apply NoDup_cons in Hnodup as [Hnotin Hnodup].
+    iSimpl in "Hpath".
+    rewrite elem_of_cons in Hdom.
+    Local Transparent own_domain.
+    iDestruct "Hpath" as "[Hh' Hpath]".
+    destruct Hdom as [Heq | Hdom].
+    - subst h'.
+      (* h not in domain, so cant use IH *)
+      iClear "IH".
+      iMod (map_update h (f h) (f' h) with "Hctx Hh'") as "[Hctx Hh]".
+      iModIntro.
+      iFrame "Hctx".
+      unfold own_domain.
+      rewrite big_sepL_cons.
+      iFrame.
+      subst f'.
+      simpl.
+      iApply (big_sepL_mono with "Hpath").
+      iIntros (i y Hy) "Hy".
+      rewrite decide_False; [iFrame|].
+      intro Heq.
+      subst.
+      apply Hnotin.
+      apply (list_elem_of_lookup_2 _ _ _ Hy).
+    - iAssert (⌜h ∈ dom⌝)%I as "Hdom'".
+      { iPureIntro. exact Hdom. }
+      iAssert (⌜NoDup dom⌝)%I as "Hnodup'".
+      { iPureIntro. exact Hnodup. }
+      repeat iSpecialize ("IH" with "[$]").
+      iMod "IH".
+      iModIntro.
+      iDestruct "IH" as "(Hctx & Hpath)".
+      iFrame "Hctx".
+      unfold own_domain.
+      rewrite big_sepL_cons.
+      iFrame.
+      subst f'.
+      simpl.
+      rewrite decide_False; [iFrame|].
+      intro Heq.
+      subst.
+      exact (Hnotin Hdom).
+  Qed.
+
+  #[global] Instance own_path_timeless γ dom q f : Timeless (own_path γ q dom f) := _.
+
+  #[global] Instance own_path_fractional γ dom f :
+    Fractional (λ q, own_path γ q dom f).
+  Proof.
+    intros p q. rewrite /own_path /own_domain -big_sepL_sep.
+    iSplit.
+    - iIntros "H1".
+      iApply (big_sepL_mono with "H1").
+      iIntros (i h Hin) "Hh1".
+      iDestruct "Hh1" as "[Hh1 Hh2]".
+      iFrame.
+    - iIntros "H1".
+      iApply (big_sepL_mono with "H1").
+      iIntros (i h Hin) "Hh1".
+      iDestruct "Hh1" as "[Hh1 Hh2]".
+      iCombine "Hh1 Hh2" as "Hh".
+      iFrame.
+  Qed.
+
+  #[global] Instance own_path_as_fractional γ path f q :
+    AsFractional (own_path γ q path f) (λ q, own_path γ q path f) q.
+  Proof.
+    split; [done|apply _].
+  Qed.
 
   Definition entry_inv
     (γ: ghost_names) (q: Qp)
     (entry: loc -d> path -d> iProp Σ)
     (e: loc) (path: path) : iProp Σ :=
-    (if decide (e = null)
-     then "Hown_empty" :: own_path γ.(map_name) q path empty_map_fn
+    (if decide (e = null) then
+       own_path γ.(map_name) q path empty_map_fn
      else
-       ∃ (next: loc),
-         "Hentry_step" :: entry_step γ q e path ∗
+       ∃ (next: loc) (k: K) (v: V) (h: Z) rest_map,
+         "#Hk" :: e ↦s[hashtriemap.entry :: "key"]□ k ∗
+         "#Hv" :: e ↦s[hashtriemap.entry :: "value"]□ v ∗
+         "%Hhash" :: ⌜uint.Z (hash_key k) = h⌝ ∗
+         "%Hbelongs" :: ⌜belongs_to_path path h⌝ ∗
          "Hown_next" :: own_Value (struct.field_ref_f hashtriemap.entry "overflow" e) (DfracOwn q) (interface.mk (ptrT.id hashtriemap.entry.id) #next) ∗
-         "#Hnext_entry" :: ▷ entry next path)%I.
+         "Hown_path" :: own_path γ.(map_name) q path (singleton_map_fn h (<[k:=v]> rest_map)) ∗
+         if decide (next = null) then
+           ⌜rest_map = ∅⌝
+         else
+           "#Hnext_entry" :: ▷ entry next path)%I.
 
   Definition entry_F
     (γ: ghost_names) (q: Qp)
@@ -482,6 +369,7 @@ Section model.
           nodeptr ↦s[hashtriemap.node :: "isEntry"]□ is_entry ∗
           if is_entry then
             ∃ ent,
+              ⌜ent ≠ null⌝ ∗
               nodeptr ↦s[hashtriemap.node :: "ent"]□ ent ∗
               nodeptr ↦s[hashtriemap.node :: "ind"]□ null ∗
               entry γ q ent path
@@ -512,13 +400,16 @@ Section model.
     (indirect: loc -d> (list Z) -d> iProp Σ)
     : loc -d> (list Z) -d> iProp Σ :=
     λ ind path,
-      (∃ (children_vals: list atomic.Value.t) children_slice mutex,
+      (∃ (children_vals: list atomic.Value.t) children_slice,
           "#Hown_children" :: ind ↦s[hashtriemap.indirect :: "children"]□ children_slice ∗
           "#Hchildren_slice" :: children_slice ↦*□ children_vals ∗
           "%Hchildren_len" :: ⌜length children_vals = 16%nat⌝ ∗
-          "#Hmutex" :: ind ↦s[hashtriemap.indirect :: "mu"]□ mutex ∗
-          "#Hind_inv" :: inv (indN) ((childrenP indirect γ (1/2)%Qp children_slice children_vals ind path)) ∗
-          "#Hind_mutex" :: is_Mutex mutex (childrenP indirect γ (1/2)%Qp children_slice children_vals ind path))%I.
+          (* "#Hmutex" :: ind ↦s[hashtriemap.indirect :: "mu"]□ mutex ∗ *)
+          "#Hind_inv" :: inv (indN) ((childrenP indirect γ (1/2) children_slice children_vals ind path)) ∗
+          "#Hind_mutex" :: is_Mutex (struct.field_ref_f hashtriemap.indirect "mu" ind) (
+              ∃ (dead: bool),
+                "Hdead" ∷ own_Bool (struct.field_ref_f hashtriemap.indirect "dead" ind) (DfracOwn 1) dead ∗
+                "Hmu_inv" ∷ ((* ⌜¬ dead⌝ -∗  *)childrenP indirect γ (1/2) children_slice children_vals ind path)))%I.
 
   (* Prove contractiveness *)
   Global Instance indirect_F_contractive γ : Contractive (indirect_F γ).
@@ -548,9 +439,6 @@ Section model.
     apply _.
   Qed.
 
-  Definition flatten (hm: hash_map) : gmap K V :=
-    map_fold (λ (_: Z) (sub: gmap K V) (acc: gmap K V), sub ∪ acc) ∅ hm.
-
   Definition ht_inv (ht: loc) (γ: ghost_names) : iProp Σ :=
     ∃ (rooti: loc) (hm: hash_map) (user_map: gmap K V),
       "Hauth_map" :: map_ctx γ.(map_name) 1 hm ∗
@@ -561,8 +449,12 @@ Section model.
       "%Hflat" :: ⌜user_map = flatten hm⌝ ∗
       (* bucket correctness - if a key exists, then its in the correct bucket *)
       "%Hbuckets" :: (⌜∀ h sub k, hm !! h = Some sub →
-                                  uint.Z (hash_key k) = h →
-                                  flatten hm !! k = sub !! k⌝).
+                                 uint.Z (hash_key k) = h →
+                                 flatten hm !! k = sub !! k⌝) ∗
+      "%Hbuckets_rev" ∷ (⌜∀ h sub k v,
+                           hm !! h = Some sub →
+                           sub !! k = Some v →
+                           uint.Z (hash_key k) = h⌝).
 
   (* Public predicate exposed to clients. *)
   (* HOCAP style *)
@@ -579,22 +471,48 @@ Section model.
   Definition ht_au_mask : coPset :=
     ⊤ ∖ ↑mapN ∖ ↑indN ∖ ↑entryN.
 
-  (* Atomic update over the abstract map state. *)
-  Definition ht_au
-    (γ: ghost_names)
-    (Φ: gmap K V → iProp Σ) : iProp Σ :=
-    (|={ht_au_mask, ∅}=> ∃ m, own_ht_map γ m ∗
-                                     (own_ht_map γ m ={∅, ht_au_mask}=∗ Φ m))%I.
+  (* (* Atomic update over the abstract map state. *) *)
+  (* Definition ht_au *)
+  (*   (γ: ghost_names) *)
+  (*   (Φ: gmap K V → iProp Σ) : iProp Σ := *)
+  (*   (|={ht_au_mask, ∅}=> ∃ m, own_ht_map γ m ∗ *)
+  (*                             (own_ht_map γ m ={∅, ht_au_mask}=∗ Φ m))%I. *)
 
-  (* AU variant for specs that return a value. *)
-  Definition ht_au_val
-    (γ: ghost_names)
-    (Φ: gmap K V → val → iProp Σ) : iProp Σ :=
-    ht_au γ (λ m, (∀ v, Φ m v)%I).
+  (* (* AU variant for specs that return a value. *) *)
+  (* Definition ht_au_val *)
+  (*   (γ: ghost_names) *)
+  (*   (Φ: gmap K V → val → iProp Σ) : iProp Σ := *)
+  (*   ht_au γ (λ m, (∀ v, Φ m v)%I). *)
 
   (* Helper for Load return values. *)
-  Definition ht_load_ret (m: gmap K V) (key: w64) : val :=
+  Definition ht_load_ret (m: gmap K V) (key: K) : val :=
     (#(default (default_val K) (m !! key)), #(bool_decide (is_Some (m !! key))))%V.
+
+  (* (* Atomic update that allows changing the abstract map state. *) *)
+  (* Definition ht_au_upd *)
+  (*   (γ: ghost_names) *)
+  (*   (Ψ: gmap K V → gmap K V → iProp Σ) : iProp Σ := *)
+  (*   (|={ht_au_mask, ∅}=> ∃ m, own_ht_map γ m ∗ *)
+  (*     (∀ m', own_ht_map γ m' ={∅, ht_au_mask}=∗ Ψ m m'))%I. *)
+
+  (* (* Helper for LoadOrStore return value and post-state. *) *)
+  (* Definition ht_load_or_store_ret (m: gmap K V) (key: K) (value: V) : val := *)
+  (*   match m !! key with *)
+  (*   | Some v => (#v, #true)%V *)
+  (*   | None => (#value, #false)%V *)
+  (*   end. *)
+
+  (* Definition ht_load_or_store_next (m: gmap K V) (key: K) (value: V) : gmap K V := *)
+  (*   match m !! key with *)
+  (*   | Some _ => m *)
+  (*   | None => <[key := value]> m *)
+  (*   end. *)
+
+  (* Definition ht_au_load_or_store *)
+  (*   (γ: ghost_names) (key: K) (value: V) (Φ: val → iProp Σ) : iProp Σ := *)
+  (*   ht_au_upd γ (λ m m', *)
+  (*                  ⌜m' = ht_load_or_store_next m key value⌝ ∗ *)
+  (*     Φ (ht_load_or_store_ret m key value))%I. *)
 
   (* Lemma flatten_lookup_Some hm key v : *)
   (*   flatten hm !! key = Some v → *)
@@ -682,8 +600,7 @@ Section model.
       init_tok γ false ∗ init_tok γ false.
   Proof.
     iMod (ghost_var_alloc (false)) as (init_γ) "[Hinit1 Hinit2]".
-    iMod (ghost_var_alloc (∅ : gmap w64 w64)) as (map_γ) "Hmap".
-    iMod (ghost_var_persist with "Hmap") as "#Hmap_discarded".
+    iMod (ghost_var_alloc (∅ : gmap K V)) as (map_γ) "Hmap".
     iMod (ghost_var_alloc (∅ : gmap K V)) as (user_γ) "[Huser1 Huser2]".
     iModIntro.
     iExists (mkNames map_γ init_γ user_γ).
@@ -693,8 +610,8 @@ Section model.
   Lemma hashtriemap_zero_init
     `{!mapG Σ Z (gmap K V), !mapG Σ K V, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
     (ht: loc) E (P: gmap w64 w64 → iProp Σ) :
-    ht ↦ default_val hashtriemap.HashTrieMap.t ⊢
-    |={E}=> ∃ γ, hashtriemap_init ht γ.
+    ht ↦ default_val hashtriemap.HashTrieMap.t ={E}=∗
+    ∃ γ, hashtriemap_init ht γ.
   Proof.
     iIntros "Hht".
     iDestruct (struct_fields_split with "Hht") as "Hfields".
@@ -717,39 +634,21 @@ Section model.
       iNext.
       iExists false.
       iFrame.
-      simpl.
       done.
     }
-    simpl.
+    set (m := struct.field_ref_f hashtriemap.HashTrieMap "initMu" ht).
 
-    iAssert (▷ init_mu_inv ht γ)%I with "[Htok2 Hseed Hroot]" as "Hmu_inv".
+    iMod (init_Mutex (init_mu_inv ht γ) E m with "HinitMu [Htok2 Hseed Hroot]") as "Hmutex".
     {
       iNext.
       iExists false.
       iFrame.
     }
 
-    set (m := struct.field_ref_f hashtriemap.HashTrieMap "initMu" ht).
-
-    iAssert (|={E}=> is_Mutex m (init_mu_inv ht γ))%I with "[HinitMu Hmu_inv]" as "Hmutex".
-    {
-      iDestruct (init_Mutex (init_mu_inv ht γ) ⊤ m with "[$]") as "Hmu".
-      iSpecialize ("Hmu" with "Hmu_inv").
-      (* iExact "Hmu". *)
-      (* TODO *)
-      (* Error: Tactic failure: iExact: "Hmu" : (|={⊤}=> is_Mutex m (init_mu_inv ht γ))%I does not match goal. *)
-      (* goal: *)
-      (* |={⊤}=> is_Mutex m (init_mu_inv ht γ) *)
-      (* ????? *)
-      admit.
-    }
-
-    iMod "Hmutex".
-
     iModIntro.
     iExists γ.
-    unfold hashtriemap_init.
     iFrame.
-  Admitted.
+    iFrame "#".
+  Qed.
 
 End model.
