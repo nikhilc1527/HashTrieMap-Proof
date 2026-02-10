@@ -1,4 +1,5 @@
 From iris.bi.lib Require Import atomic.
+From iris.program_logic Require Import atomic.
 
 From New.code.hashtriemap Require Import hashtriemap.
 From New.generatedproof.hashtriemap Require Import hashtriemap.
@@ -258,15 +259,6 @@ Section proof.
     iPersist "value".
 
     iAssert (
-        (* ∃ (HIP: bool), *)
-        (*   if HIP *)
-        (*   then *)
-        (*     ∃ nodeptr children_slice next_nibble path cur, *)
-        (*       "slot" ∷ slot_ptr ↦ slice.elem_ref_f children_slice atomic.Value next_nibble ∗ *)
-        (*       "n" ∷ n_ptr ↦ nodeptr ∗ *)
-        (*       "Hcur" ∷ i_ptr ↦ cur ∗ *)
-        (*       "Hhash_shift" ∷ hashShift_ptr ↦ w64_word_instance.(word.sub) (W64 (sh path)) (W64 4) *)
-        (*   else *)
             ∃ slot n i shift,
               "slot" :: slot_ptr ↦ slot ∗
               "n" :: n_ptr ↦ n ∗
@@ -525,7 +517,9 @@ Section proof.
         iDestruct (map_valid with "Hauth_map Hptsto") as %Hlookup.
         iDestruct ("Hptsto_close" with "Hptsto") as "Hchild".
 
-        iMod "Hau" as (user_map2) "(Huser_map2 & [_ Hau_close])".
+        iMod "Hau" as (user_map2) "(Huser_map2 & Hau_close)".
+
+        (* iMod "Hau" as (user_map2) "(Huser_map2 & [_ Hau_close])". *)
 
         iDestruct (ghost_var_agree with "Huser_map Huser_map2") as %Heq.
         subst user_map2.
@@ -984,6 +978,7 @@ Section proof.
 
           wp_apply wp_Value__Store.
 
+
           iInv "Hind_inv" as "HI" "Hclose_ind".
           iApply fupd_mask_intro; first apply empty_subseteq.
           iIntros "Hmask".
@@ -1026,21 +1021,33 @@ Section proof.
 
           iDestruct (field_pointsto_not_null with "HisEntry") as %Hnn; [simpl; done|auto|].
 
-          iMod (inv_alloc entryN _ (entry_inv γ (1/2) (entry γ (1/2)) e path) with "[]") as "#Hent_inv2".
+          iDestruct "Hoverflow" as "[Hoverflow Hoverflow2]".
+
+          iEval (unfold childP) in "Hchild2".
+          iSimpl in "Hchild2".
+
+          iMod (inv_alloc entryN _ (entry_inv γ (1/2) (entry γ (1/2)) e path) with "[Hoverflow Hchild2]") as "#Hent_inv2".
           {
             iNext.
             unfold entry_inv.
             rewrite decide_False; [|done].
+            rewrite /named.
             iFrame "#".
+            iFrame.
+            iExists h.
+            iExists ∅.
+            simpl.
+            iSplit; [auto|].
+            iSplit; [auto|].
+            iFrame.
             admit.
           }
 
-          iDestruct ("Hchildren_close2" with "[Hchild2 Hown_child2]") as "Hchildren2".
+          iDestruct ("Hchildren_close2" with "[Hown_child2]") as "Hchildren2".
           {
             iFrame.
             rewrite /named.
             unfold childP.
-            iSimpl in "Hchild2".
             rewrite decide_False; [|exact Hnn].
             iFrame "#".
             iExists e.
@@ -1049,14 +1056,497 @@ Section proof.
             rewrite entry_unfold /entry_F /named.
             iFrame "Hent_inv2".
           }
-
+          iDestruct ("Hchildren_close" with "[Hown_child]") as "Hchildren".
+          {
+            iFrame.
+            rewrite /named.
+            unfold childP.
+            rewrite decide_False; [|exact Hnn].
+            iFrame "#".
+            iExists e.
+            iFrame "#".
+            iSplit; [done|].
+            rewrite entry_unfold /entry_F /named.
+            iFrame "Hent_inv2".
+          }
+          iMod "Hmask" as "_".
+          iMod ("Hclose_ind" with "Hchildren2") as "_".
+          iModIntro.
+          wp_auto.
+          wp_apply (wp_Mutex__Unlock with "[$Hind_mutex $Hown_mutex $Hdead $Hchildren]").
           admit.
         }
-        admit.
+
+        iDestruct "Hchild" as (ent) "(%Hen & #Heent & #Heind & #Hentry)".
+        wp_apply wp_node__entry; [iFrame "#"|].
+        Check wp_entry__lookup.
+        wp_apply wp_entry__lookup.
+        rewrite /named.
+        iFrame "#".
+        repeat iSplit; auto.
+
+        Search ElimAcc.
+
+        iAuIntro.
+
+        iApply (aacc_aupd with "Hau").
+        { set_solver. }
+        iIntros (user_map) "Huser_map".
+        iAaccIntro with "Huser_map"; iIntros "Huser_map".
+        - iFrame.
+          iModIntro.
+          iIntros "$".
+          done.
+        - iModIntro.
+          iFrame "Huser_map".
+          unfold ht_load_ret.
+
+          destruct (user_map !! key).
+          + iRight.
+            iExists true.
+            iExists k.
+            iSplit; [auto|].
+            iIntros "HΦ".
+            iModIntro.
+            wp_auto.
+            iDestruct ("Hchildren_close" with "[$Hown_child]") as "Hchildren".
+            {
+              unfold childP.
+              rewrite decide_False; [|auto].
+              iFrame "#".
+              iFrame "#".
+              done.
+            }
+            wp_apply (wp_Mutex__Unlock with "[$Hown_mutex $Hind_mutex $Hdead $Hchildren]").
+            wp_end.
+          + iLeft.
+            iIntros "Hau".
+            iModIntro.
+            wp_auto.
+            wp_apply wp_newEntryNode.
+            iIntros (e n4) "orphaned".
+            wp_auto.
+            wp_if_destruct.
+            * exfalso. congruence.
+            * (* TODO: expand *)
+              admit.
       }
-      admit.
+      iDestruct ("Hchildren_close" with "[Hchild $Hown_child]") as "Hchildren".
+      {
+        unfold childP.
+        rewrite decide_False; auto.
+        iFrame "#".
+        iDestruct "Hchild" as (x) "(%Hlen & Ha & Hb & Hc)".
+        iFrame.
+        iPureIntro.
+        done.
+      }
+      wp_apply (wp_Mutex__Unlock with "[$Hind_mutex $Hown_mutex $Hdead $Hchildren]").
+      wp_for_post.
+      iFrame.
     }
 
+    wp_apply (wp_Mutex__Lock with "[$Hind_mutex]").
+    iIntros "[Hown_mutex His_mutex]".
+    iDestruct "His_mutex" as (dead) "[Hdead Hchildren]".
+    iDestruct (big_sepL_lookup_acc with "Hchildren") as "[Hchild Hchildren_close]".
+    { exact Hv. }
+    iNamed "Hchild".
+
+    wp_auto.
+    wp_apply wp_Value__Load.
+    iEval (unfold childP) in "Hchild".
+    iInv "Hind_inv" as "HI" "Hind_close".
+    iEval (unfold childrenP) in "HI".
+    iApply fupd_mask_intro; [apply empty_subseteq|].
+    iIntros "Hmask".
+    iNext.
+    iNamedSuffix "HI" "2".
+    iDestruct (big_sepL_lookup_acc with "Hchildren2") as "[Hchild2 Hchildren_close2]".
+    { exact Hv. }
+    iNamedSuffix "Hchild2" "2".
+    iCombine "Hown_child Hown_child2" gives %[_ ?].
+    inversion H.
+    apply (inj to_val) in H1.
+    subst nodeptr1.
+    clear H.
+
+    iExists (interface.mk (ptrT.id hashtriemap.node.id) (# nodeptr0)).
+    replace (W64 (sint.nat next_nibble)) with next_nibble by word.
+    iFrame "Hown_child".
+    iIntros "Hown_child".
+    iMod "Hmask" as "_".
+
+    iDestruct ("Hchildren_close2" with "[$Hchild2 $Hown_child2]") as "Hchildren2".
+    iMod ("Hind_close" with "Hchildren2") as "_".
+    iModIntro.
+
+    wp_apply wp_interface_type_assert; [auto|].
+    (* iEval (unfold childP) in "Hchild". *)
+    (* iNamed "Hchild". *)
+    destruct (decide (nodeptr0 = null)).
+    - rewrite e.
+      clear e.
+      wp_auto.
+      wp_apply wp_Bool__Load.
+      iApply fupd_mask_intro; [apply empty_subseteq|].
+      iIntros "Hmask".
+      iFrame "Hdead".
+      iIntros "Hdead".
+      iMod "Hmask" as "_".
+      iModIntro.
+      wp_auto.
+      wp_if_destruct.
+      + iDestruct ("Hchildren_close" with "[$Hown_child $Hchild]") as "Hchildren".
+        wp_apply (wp_Mutex__Unlock with "[$Hind_mutex $Hown_mutex $Hdead $Hchildren]").
+        wp_for_post.
+        iFrame.
+      + wp_for_post.
+        wp_apply wp_newEntryNode.
+        iIntros (e n3) "orphaned".
+        unfold orphaned_entry.
+        iNamedSuffix "orphaned" "3".
+        wp_auto.
+        wp_apply wp_Value__Store.
+        iClear "Hroot_indirect".
+        iClear "Hroot_indirect2".
+        clear rooti.
+        clear Hbuckets2.
+        clear Hbuckets_rev2.
+        clear Hflat2.
+        clear hm.
+        clear user_map.
+        iInv "His_map" as (rooti hm user_map) "(>? & >? & >? & Hroot_indirect & >? & >? & >?)" "Hclose_map".
+        iInv "Hind_inv" as "Hind" "Hclose_ind_inv".
+        iEval (unfold childrenP) in "Hind".
+        iNamed.
+        iMod (fupd_mask_subseteq ht_au_mask) as "Hau_close_mask".
+        { unfold ht_au_mask; apply subseteq_difference_l; set_solver. }
+
+        iDestruct (big_sepL_elem_of_acc with "Hchild") as "[Hptsto Hptsto_close]".
+        { exact Hdom. }
+        iDestruct (map_valid with "Hauth_map Hptsto") as %Hlookup.
+        iDestruct ("Hptsto_close" with "Hptsto") as "Hchild".
+
+        iMod "Hau" as (user_map2) "(Huser_map2 & Hau_close)".
+
+        (* iMod "Hau" as (user_map2) "(Huser_map2 & [_ Hau_close])". *)
+
+        iDestruct (ghost_var_agree with "Huser_map Huser_map2") as %Heq.
+        subst user_map2.
+        iMod (ghost_var_update_halves (<[key:=value]> user_map) with "Huser_map Huser_map2") as "[Huser_map Huser_map2]".
+
+        iDestruct (big_sepL_lookup_acc with "Hind") as "[Hchild2 Hchildren_close2]"; [exact Hv|].
+        iDestruct "Hchild2" as (nodeptr2) "[>Hown_child2 Hchild2]".
+        iNamedSuffix "Hown_child2" "2".
+        replace (W64 (sint.nat next_nibble)) with next_nibble by word.
+        iDestruct (own_Value_agree with "Hown_child Hown_child2") as %Heq.
+        inversion Heq.
+        clear Heq.
+        apply (inj to_val) in H0.
+        subst nodeptr2.
+        iEval (unfold childP) in "Hchild2".
+        iSimpl in "Hchild2".
+        iMod "Hchild2".
+        iNamedSuffix "Hchild2" "2".
+
+        iMod (own_path_update_key key value with "Hauth_map [Hchild Hchild2]") as "[Hauth_map Hchild]".
+        { exact Hkey_path. }
+        { iCombine "Hchild Hchild2" as "Hchild". iExact "Hchild". }
+
+        iNamed.
+        iEval (rewrite decide_True) in "Hctx".
+        unfold empty_map_fn.
+        subst h.
+        set h := uint.Z (hash_key key).
+
+        have Hnone : (user_map !! key = None).
+        {
+          subst user_map.
+          unfold empty_map_fn in Hlookup.
+          have Hflat : flatten hm !! key = (∅ : gmap K V) !! key.
+          { apply (Hbuckets h ∅ key); [exact Hlookup|reflexivity]. }
+          rewrite Hflat.
+          rewrite lookup_empty.
+          done.
+        }
+
+        iMod ("Hau_close" with "[$Huser_map2]") as "HΦ".
+        {
+          rewrite Hnone.
+          auto.
+        }
+
+        iMod "Hau_close_mask" as "_".
+        iApply (fupd_mask_intro); first apply empty_subseteq.
+        iIntros "Hmask".
+        iNext.
+        iNamed.
+
+        change (λ h' : Z, if decide (h' = h) then <[key:=value]> ∅ else ∅)
+          with (singleton_map_fn h (<[key:=value]> ∅)).
+
+        iCombine "Hown_child Hown_child2" as "Hown_child".
+        iFrame.
+        iIntros "[Hown_child Hown_child2]".
+        iDestruct (field_pointsto_not_null with "HisEntry3") as %Hnn.
+        { simpl. done. }
+        { auto. }
+        iDestruct (field_pointsto_not_null with "Hnode3") as %Hen.
+        { simpl. done. }
+        { auto. }
+
+        iDestruct "Hpath" as "[Hown_path Hown_path2]".
+        iDestruct "Hoverflow3" as "[Hoverflow Hoverflow2]".
+
+        iClear "Hentry_inv".
+
+        (* TODO: make entry invariant instance of as_fractional because what is even this *)
+        iMod (inv_alloc entryN _ (entry_inv γ (1/2) (entry γ (1/2)) e path) with "[Hoverflow Hown_path]") as "Hinv".
+        {
+          iNext.
+          unfold entry_inv.
+          rewrite decide_False; [|exact Hen].
+          (* unfold entry_step. *)
+          iExists null.
+          rewrite /named.
+          iFrame.
+          iFrame "#".
+          simpl.
+          iPureIntro; done.
+        }
+        iMod (inv_alloc entryN _ (entry_inv γ (1/2) (entry γ (1/2)) e path) with "[Hoverflow2 Hown_path2]") as "Hinv2".
+        {
+          iNext.
+          unfold entry_inv.
+          rewrite decide_False; [|exact Hen].
+          (* unfold entry_step. *)
+          iExists null.
+          rewrite /named.
+          iFrame.
+          iFrame "#".
+          simpl.
+          iPureIntro; done.
+        }
+
+        iDestruct ("Hchildren_close2" with "[$Hown_child2 Hinv]") as "Hchildren2".
+        {
+          rewrite /named.
+          unfold childP.
+          rewrite decide_False; [|exact Hnn].
+          iFrame "#".
+          iFrame "#".
+          iSplit; [iPureIntro; exact Hen|].
+          iApply entry_unfold.
+          unfold entry_F.
+          iFrame.
+        }
+        iMod "Hmask" as "_".
+
+        iMod ("Hclose_ind_inv" with "[Hchildren2]") as "_".
+        {
+          iNext.
+          unfold childrenP.
+          iFrame "Hchildren2".
+        }
+
+        unfold empty_map_fn in Hlookup.
+        replace (uint.Z (hash_key key)) with h in * by reflexivity.
+
+        iMod ("Hclose_map" with "[Huser_map Hctx Hown_root Hroot_indirect]") as "_".
+        {
+          iNext.
+          rewrite /named.
+          unfold ht_inv.
+          iExists rooti.
+          iExists (<[h:=<[key:=value]> ∅]> hm).
+          rewrite /named.
+          iFrame.
+          iFrame "#".
+          iPureIntro.
+          set hm' := <[h := <[key:=value]> ∅]> hm.
+          set um' := <[key:=value]> user_map.
+
+          assert (Hum' : (um' = flatten hm')).
+          {
+            subst um' hm'.
+            symmetry.
+            subst user_map.
+            apply (flatten_update_update hm h key value ∅ ).
+            - exact Hlookup.
+            - reflexivity.
+            - intros.
+              eapply Hbuckets_rev.
+              + exact H.
+              + exact H0.
+         }
+
+         split; [exact Hum'|].
+          split.
+          {
+            intros h0 sub k Hhm' Hhash.
+            rewrite -Hum'.
+            subst um' hm'.
+            destruct (decide (h0 = h)) as [->|Hneq].
+            - rewrite lookup_insert in Hhm'.
+              rewrite decide_True in Hhm'; [|reflexivity].
+              inversion Hhm'; subst sub; clear Hhm'.
+              destruct (decide (k = key)) as [->|Hk].
+              + rewrite lookup_insert. rewrite lookup_insert.
+                rewrite decide_True; [|reflexivity].
+                rewrite decide_True; [|reflexivity].
+                done.
+              + rewrite lookup_insert_ne; [|done].
+                have Hnone_k : user_map !! k = None.
+                { rewrite Hflat.
+                  have Hflatk : flatten hm !! k = (∅ : gmap K V) !! k
+                                                    by apply (Hbuckets h ∅ k Hlookup Hhash).
+                  rewrite Hflatk lookup_empty. done.
+                }
+                rewrite Hnone_k.
+                rewrite lookup_insert_ne; [|done].
+                rewrite lookup_empty. done.
+            - rewrite lookup_insert_ne in Hhm'; [|done].
+              have Hsub : hm !! h0 = Some sub := Hhm'.
+              destruct (decide (k = key)) as [->|Hk].
+              + exfalso. apply Hneq.
+                subst h. rewrite Hhash.
+                done.
+              + rewrite lookup_insert_ne; [|done].
+                rewrite Hflat.
+                eapply Hbuckets; eauto.
+          }
+          {
+            intros.
+            subst hm'.
+            destruct (decide (h0 = h)) as [->|Hneq].
+            - rewrite lookup_insert in H.
+              rewrite decide_True in H; [|done].
+              inversion H; subst sub; clear H.
+              destruct (decide (k = key)) as [->|Hk].
+              + done.
+              + rewrite lookup_insert_ne in H0; [|done].
+                rewrite lookup_empty in H0. discriminate.
+            - rewrite lookup_insert_ne in H; [|done].
+              eapply Hbuckets_rev; eauto.
+          }
+        }
+
+        iModIntro.
+
+        wp_auto.
+
+        iDestruct ("Hchildren_close" with "[Hown_child Hnode3 Hinv2]") as "Hchildren".
+        {
+          iFrame.
+          unfold childP.
+          rewrite decide_False; [|exact Hnn].
+          iFrame "#".
+          iExists e.
+          iSplit; [done|].
+          iFrame "#".
+          iApply entry_unfold.
+          unfold entry_F.
+          iFrame "Hinv2".
+        }
+
+        wp_apply (wp_Mutex__Unlock with "[$Hind_mutex $Hown_mutex $Hdead $Hchildren]").
+
+        iApply "HΦ".
+    - wp_if_destruct.
+      { exfalso; congruence. }
+      iDestruct "Hchild" as (is_entry) "[HisEntry Hentry]".
+      wp_auto.
+      wp_if_destruct.
+      + wp_apply wp_Bool__Load.
+        iApply fupd_mask_intro; [apply empty_subseteq|].
+        iIntros "Hmask".
+        iFrame "Hdead".
+        iIntros "Hdead".
+        iMod "Hmask" as "_".
+        iModIntro.
+        wp_auto.
+        wp_if_destruct.
+        *
+          iDestruct ("Hchildren_close" with "[$Hown_child HisEntry Hentry]") as "Hchildren".
+          {
+            rewrite /named.
+            iFrame.
+            unfold childP.
+            rewrite decide_False; auto.
+          }
+          wp_apply (wp_Mutex__Unlock with "[$Hind_mutex $Hown_mutex $Hdead $Hchildren]").
+          wp_for_post.
+          iFrame.
+        * wp_for_post.
+          wp_if_destruct.
+          { exfalso; congruence. }
+          iDestruct "Hentry" as (ent0) "(%Hentnotnull & #Hent0 & #Hindnull & #Hentry)".
+          iPersist "HisEntry".
+          wp_apply wp_node__entry.
+          { iFrame "#". }
+
+                  wp_apply wp_entry__lookup.
+        rewrite /named.
+        iFrame "#".
+        repeat iSplit; auto.
+
+        Search ElimAcc.
+        {
+          iAuIntro.
+          iApply (aacc_aupd with "Hau").
+          { set_solver. }
+          iIntros (user_map) "Huser_map".
+          iAaccIntro with "Huser_map"; iIntros "Huser_map".
+          - iFrame.
+            iModIntro.
+            iIntros "$".
+            done.
+          - iModIntro.
+            iFrame "Huser_map".
+            unfold ht_load_ret.
+
+            destruct (user_map !! key).
+            + iRight.
+              iExists true.
+              iExists k.
+              iSplit; [auto|].
+              iIntros "HΦ".
+              iModIntro.
+              wp_auto.
+              iDestruct ("Hchildren_close" with "[$Hown_child]") as "Hchildren".
+              {
+                unfold childP.
+                rewrite decide_False; [|auto].
+                iFrame "#".
+                iFrame "#".
+                done.
+              }
+              wp_apply (wp_Mutex__Unlock with "[$Hown_mutex $Hind_mutex $Hdead $Hchildren]").
+              wp_end.
+            + iLeft.
+              iIntros "Hau".
+              iModIntro.
+              wp_auto.
+              wp_apply wp_newEntryNode.
+              iIntros (e n6) "orphaned".
+              wp_auto.
+              wp_if_destruct.
+              * exfalso. congruence.
+              * (* TODO: expand *)
+                admit.
+        }
+      + iDestruct ("Hchildren_close" with "[$Hown_child HisEntry Hentry]") as "Hchildren".
+        {
+          rewrite /named /childP.
+          rewrite decide_False; auto.
+          iDestruct "Hentry" as (x) "(Ha & Hb & Hc & Hd)".
+          iFrame.
+          auto.
+        }
+        wp_apply (wp_Mutex__Unlock with "[$Hind_mutex $Hown_mutex $Hdead $Hchildren]").
+        wp_for_post.
+        iFrame.
   Admitted.
 
   Lemma wp_HashTrieMap__expand (ht: loc) (oldEntry: loc) (newEntry: loc) (newHash: w64) (hashShift: w64) (parent: loc) :
