@@ -44,6 +44,36 @@ Section model.
     base.filter
       (belongs_to_path p)
       (full_domain).
+  #[global] Opaque path_to_domain.
+
+  Lemma dom_no_dup p : NoDup (path_to_domain p).
+  Proof.
+    Local Transparent path_to_domain.
+      unfold path_to_domain.
+    apply NoDup_filter.
+    Local Transparent full_domain.
+    unfold full_domain.
+    apply NoDup_seqZ.
+  Qed.
+
+  Lemma full_domain_elem (k : w64) :
+    uint.Z k ∈ full_domain.
+  Proof.
+    #[local] Transparent full_domain.
+    apply elem_of_seqZ; word.
+  Qed.
+
+  Lemma in_domain p (k: w64) h :
+    h = uint.Z k →
+    belongs_to_path p h → h ∈ path_to_domain p.
+  Proof.
+    intros.
+    unfold path_to_domain.
+    rewrite list_elem_of_filter.
+    split.
+    - exact H0.
+    - apply elem_of_seqZ; word.
+  Qed.
 
   Lemma path_to_prefix_snoc (p : path) (n : nibble) :
     path_to_prefix (p ++ [n]) =
@@ -136,13 +166,6 @@ Section model.
     repeat rewrite sh_snoc.
     replace (path_to_prefix p ≪ 4 + n + 1) with (path_to_prefix p ≪ 4 + (n + 1)) by lia.
     reflexivity.
-  Qed.
-
-  Lemma full_domain_elem (k : w64) :
-    uint.Z k ∈ full_domain.
-  Proof.
-    #[local] Transparent full_domain.
-    apply elem_of_seqZ; word.
   Qed.
 
   Lemma path_to_domain_elem (p : path) (k : Z) :
