@@ -48,12 +48,14 @@ These limitations are the reason for the differences between the implementation 
 - Generated proofs: `src/generatedproof`
 - Proof setup: `src/proof`
 
-## Workflow
-Build proofs:
-   ```sh
-   make
-   ```
-relies on having `perennial-cli` installed.
+## Build
+Install dependencies and build proofs:
+```sh
+go mod tidy
+opam pin add --no-action -k path .
+opam install --deps-only .
+make
+```
 
 ## Tests
 A small Go test exists at `hashtriemap/hashtriemap/hashtriemap_test.go` to sanity-check
