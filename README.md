@@ -69,3 +69,4 @@ go test ./hashtriemap
 ## References
 
 + [https://link.springer.com/chapter/10.1007/978-3-662-44202-9_9](https://link.springer.com/chapter/10.1007/978-3-662-44202-9_9)
++ [https://iris-project.org/pdfs/2021-pldi-transfinite-iris-final-appendix.pdf](https://iris-project.org/pdfs/2021-pldi-transfinite-iris-final-appendix.pdf)

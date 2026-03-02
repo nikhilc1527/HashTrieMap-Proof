@@ -19,21 +19,27 @@ Open Scope Z_scope.
 Section model.
   (* namespace definitions *)
   Definition mapN         : namespace := nroot .@ "hashtriemap".
-  Definition init_statusN : namespace := nroot .@ "hashtriemap.init_status".
+  Definition init_statusN : namespace := nroot .@ "init_status".
   Definition indN         : namespace := nroot .@ "indirect".
   Definition entryN       : namespace := nroot .@ "entry".
 
   (* Ghost state for the hashtriemap. *)
   Record ghost_names := mkNames {
-                            map_name : gname;
+                            (* bool *)
                             init_name : gname;
+                            (* auth_map w64 (gmap K V) *)
+                            map_name : gname;
+                            (* auth_map K V *)
                             user_name : gname;
                           }.
 
   (* just to be clear, and to not get confused with w64's everywhere *)
   Definition K : Type := w64.
   Definition V : Type := w64.
-  Definition hashT : Type := w64.
+  #[global] Instance K_inhab : Inhabited K := _.
+  #[global] Opaque K V.
+
+  Parameter hash_key : K → w64.
 
   Context `{hG: heapGS Σ, !ffi_semantics _ _}
     `{!globalsGS Σ, !ghost_varG Σ (gmap w64 w64)}
@@ -41,26 +47,24 @@ Section model.
     `{!mapG Σ Z (gmap K V)}
     {go_ctx: GoContext}.
 
-  Definition hash_map : Type := gmap Z (gmap K V). (* TODO: should be gmap hashT (gmap K V), its just Z for now to make the above helper lemmas easier *)
+  Definition hash_map : Type := gmap Z (gmap K V).
 
   Definition empty_hash_map : hash_map :=
     gset_to_gmap ∅ (list_to_set full_domain).
 
-  Parameter hash_key : w64 → w64.
-
   Definition own_domain
-    (γ : gname) (q: Qp) (dom : domain) (f: Z → gmap K V) : iProp Σ :=
-    [∗ list] hash ∈ dom, ptsto_mut γ hash q (f hash).
+    (γ : ghost_names) (q: Qp) (dom : domain) (f: Z → gmap K V) : iProp Σ :=
+    [∗ list] hash ∈ dom, ptsto_mut γ.(map_name) hash q (f hash).
 
-  Global Opaque own_domain.
-  Local Transparent own_domain.
+  #[global] Opaque own_domain.
+  #[local] Transparent own_domain.
 
   Definition own_path
-    (γ : gname) (q: Qp) (p : path) (f: Z → gmap K V) : iProp Σ :=
+    (γ : ghost_names) (q: Qp) (p : path) (f: Z → gmap K V) : iProp Σ :=
     own_domain γ q (path_to_domain p) f.
 
-  Global Opaque own_path.
-  Local Transparent own_path.
+  #[global] Opaque own_path.
+  #[local] Transparent own_path.
 
   (* Constant function: all hashes map to empty *)
   Definition empty_map_fn : Z → gmap K V := λ _, ∅.
@@ -98,24 +102,26 @@ Section model.
     split; [done|apply _].
   Qed.
 
+  Definition own_entry (γ: ghost_names) (q: Qp) (k: K) (v: V) : iProp Σ :=
+    ptsto_mut γ.(user_name) k q v.
+
+  (* entry cannot own the path, then it becomes duplicate ownership between the entries *)
+  (* the indirect (node) holding the entry chain needs to own the path, and then the entries *)
+  (* own keys that belong to that path *)
   Definition entry_inv
     (γ: ghost_names) (q: Qp)
     (entry: loc -d> path -d> iProp Σ)
-    (e: loc) (path: path) : iProp Σ :=
-    (if decide (e = null) then
-       own_path γ.(map_name) q path empty_map_fn
-     else
-       ∃ (next: loc) (k: K) (v: V) (h: Z) rest_map,
-         "#Hk" :: e ↦s[hashtriemap.entry :: "key"]□ k ∗
-         "#Hv" :: e ↦s[hashtriemap.entry :: "value"]□ v ∗
-         "%Hhash" :: ⌜uint.Z (hash_key k) = h⌝ ∗
-         "%Hbelongs" :: ⌜belongs_to_path path h⌝ ∗
-         "Hown_next" :: (struct.field_ref_f hashtriemap.entry "overflow" e) ↦ᵥ{q} (interface.mk (ptrT.id hashtriemap.entry.id) #next) ∗
-         "Hown_path" :: own_path γ.(map_name) q path (singleton_map_fn h (<[k:=v]> rest_map)) ∗
-         if decide (next = null) then
-           ⌜rest_map = ∅⌝
-         else
-           "#Hnext_entry" :: ▷ entry next path)%I.
+    (e: loc) (path: path)
+    : iProp Σ :=
+    ∃ (next: loc) (k: K) (v: V) (h: Z),
+      "#Hk" :: e ↦s[hashtriemap.entry :: "key"]□ k ∗
+      "#Hv" :: e ↦s[hashtriemap.entry :: "value"]□ v ∗
+      "Hown_next" :: (struct.field_ref_f hashtriemap.entry "overflow" e) ↦ᵥ{q}
+        (interface.mk (ptrT.id hashtriemap.entry.id) #next) ∗
+      "Hown_entry" ∷ own_entry γ q k v ∗
+      "%Hhash" :: ⌜uint.Z (hash_key k) = h⌝ ∗
+      "%Hbelongs" :: ⌜belongs_to_path path h⌝ ∗
+      "#Hnext_entry" :: (⌜next ≠ null⌝ -∗ ▷ entry next path).
 
   Definition entry_F
     (γ: ghost_names) (q: Qp)
@@ -124,17 +130,11 @@ Section model.
     λ e path,
       ("#Hentry_inv" :: inv entryN (entry_inv γ q entry e path))%I.
 
-  Global Instance entry_F_contractive γ q : Contractive (entry_F γ q).
+  #[global] Instance entry_F_contractive γ q : Contractive (entry_F γ q).
   Proof.
     rewrite /entry_F /entry_inv.
     intros n f g Hfg e path.
-    f_equiv.
-    f_equiv.
-    f_equiv.
-    f_equiv.
-    f_equiv.
-    f_equiv.
-    f_equiv.
+    do 11 f_equiv.
     solve_contractive.
   Qed.
 
@@ -151,27 +151,45 @@ Section model.
     apply _.
   Qed.
 
+  Definition indirect_node
+    (child_indirect: loc -d> path -d> iProp Σ)
+    (γ: ghost_names) (q: Qp)
+    (nodeptr: loc)
+    (path child_path: path) : iProp Σ :=
+    ∃ ind,
+      "%Hchild_path_len" ∷ ⌜length child_path < 16⌝ ∗
+      "%Hchild_not_null" ∷ ⌜ind ≠ null⌝ ∗
+      "#Hchild_ind_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ind"]□ ind ∗
+      "#Hchild_ent_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ent"]□ null ∗
+      "#Hchild_ind" ∷ ▷ child_indirect ind child_path.
+
+  Definition entry_node
+    (γ: ghost_names) (q: Qp)
+    (nodeptr: loc)
+    (path: path) : iProp Σ :=
+    ∃ ent map hash,
+      "Hown_path" ∷ own_path γ q path (singleton_map_fn hash map) ∗
+      "%Hchild_not_null" ∷ ⌜ent ≠ null⌝ ∗
+      "#Hchild_ent_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ent"]□ ent ∗
+      "#Hchild_ind_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ind"]□ null ∗
+      "#Hchild_entry" ∷ entry γ q ent path.
+
+  (* definition of node *)
   Definition childP
     (child_indirect: loc -d> path -d> iProp Σ)
     (γ: ghost_names) (q: Qp)
-    nodeptr (path child_path: path) : iProp Σ :=
+    (nodeptr: loc)
+    (path child_path: path) : iProp Σ :=
     if (decide (nodeptr = null)) then
-      own_path γ.(map_name) q path empty_map_fn
+      "Hchild" ∷ own_path γ q child_path empty_map_fn
     else
       (∃ (is_entry: bool),
-          nodeptr ↦s[hashtriemap.node :: "isEntry"]□ is_entry ∗
-          if is_entry then
-            ∃ ent,
-              ⌜ent ≠ null⌝ ∗
-              nodeptr ↦s[hashtriemap.node :: "ent"]□ ent ∗
-              nodeptr ↦s[hashtriemap.node :: "ind"]□ null ∗
-              entry γ q ent path
-          else
-            ∃ ind,
-              ⌜length child_path < 16⌝ ∗
-              nodeptr ↦s[hashtriemap.node :: "ent"]□ null ∗
-              nodeptr ↦s[hashtriemap.node :: "ind"]□ ind ∗
-              ▷ child_indirect ind child_path)%I.
+          "#Hnode_is_entry" ∷ nodeptr ↦s[hashtriemap.node :: "isEntry"]□ is_entry ∗
+          "Hchild" ∷
+            (if is_entry then
+               entry_node γ q nodeptr child_path
+             else
+               indirect_node child_indirect γ q nodeptr path child_path))%I.
 
   Definition childrenP
     (child_indirect: loc -d> path -d> iProp Σ)
@@ -179,11 +197,10 @@ Section model.
     (children_vals: list atomic.Value.t)
     (ind: loc) (path: path) : iProp Σ :=
     "Hchildren" :: [∗ list] i ↦ val ∈ children_vals,
-      let child_path := path ++ [Z.of_nat i] in
       ∃ (nodeptr: loc),
-        "Hown_child" :: own_Value (slice.elem_ref_f children_slice atomic.Value i) (DfracOwn q)
+        "Hown_child" :: (slice.elem_ref_f children_slice atomic.Value i) ↦ᵥ{q}
           (interface.mk (ptrT.id hashtriemap.node.id) #nodeptr) ∗
-        "Hchild" :: childP child_indirect γ q nodeptr path child_path.
+        "Hchild" :: childP child_indirect γ q nodeptr path (path ++ [Z.of_nat i]).
 
   (* split 50/50 between an invariant and the mutex to allow for lock-free reads *)
   (* we always have read permission on any indirect, but only can write if we acquire the lock *)
@@ -193,19 +210,19 @@ Section model.
     (indirect: loc -d> (list Z) -d> iProp Σ)
     : loc -d> (list Z) -d> iProp Σ :=
     λ ind path,
-      (∃ (children_vals: list atomic.Value.t) children_slice,
+      (∃ (children_vals: list atomic.Value.t) (children_slice: slice.t),
           "#Hown_children" :: ind ↦s[hashtriemap.indirect :: "children"]□ children_slice ∗
           "#Hchildren_slice" :: children_slice ↦*□ children_vals ∗
           "%Hchildren_len" :: ⌜length children_vals = 16%nat⌝ ∗
-          (* "#Hmutex" :: ind ↦s[hashtriemap.indirect :: "mu"]□ mutex ∗ *)
           "#Hind_inv" :: inv (indN) ((childrenP indirect γ (1/2) children_slice children_vals ind path)) ∗
           "#Hind_mutex" :: is_Mutex (struct.field_ref_f hashtriemap.indirect "mu" ind) (
+              (* dont need to split dead between inv and mutex because its only used for modification of the tree *)
               ∃ (dead: bool),
                 "Hdead" ∷ own_Bool (struct.field_ref_f hashtriemap.indirect "dead" ind) (DfracOwn 1) dead ∗
-                "Hmu_inv" ∷ ((* ⌜¬ dead⌝ -∗  *)childrenP indirect γ (1/2) children_slice children_vals ind path)))%I.
+                "Hmu_inv" ∷ ((* ⌜dead = false⌝ -∗ *) childrenP indirect γ (1/2) children_slice children_vals ind path)))%I.
 
   (* Prove contractiveness *)
-  Global Instance indirect_F_contractive γ : Contractive (indirect_F γ).
+  #[global] Instance indirect_F_contractive γ : Contractive (indirect_F γ).
   Proof.
     rewrite /indirect_F.
     intros n f g Hfg ind path.
@@ -214,8 +231,15 @@ Section model.
     f_equiv.
     f_equiv.
     have H : ((childrenP f γ (1 / 2) a0 a ind path) ≡{n}≡ (childrenP g γ (1 / 2) a0 a ind path)).
-    { unfold childrenP. repeat f_equiv. unfold childP. solve_contractive. }
-    repeat f_equiv; exact H.
+    {
+      unfold childrenP.
+      repeat f_equiv.
+      unfold childP.
+      repeat f_equiv.
+      solve_contractive.
+    }
+    repeat f_equiv.
+    all: exact H.
   Qed.
 
   Definition indirect (γ: ghost_names) (ind: loc) (path: path) : iProp Σ :=
@@ -232,23 +256,33 @@ Section model.
     apply _.
   Qed.
 
+  #[global] Instance indirect_node_persistent γ q nodeptr path child_path : Persistent (indirect_node (indirect γ) γ q nodeptr path child_path).
+  Proof.
+    apply _.
+  Qed.
+
   (* Abstract map state seen by clients. *)
   Definition own_ht_map (γ: ghost_names) (m: gmap K V) : iProp Σ :=
-    ghost_var γ.(user_name) (DfracOwn (1/2)) m.
+    map_ctx γ.(user_name) (1/2) m.
 
+  (* abstract the state of the entire map, can be fully abstracted away from hashtriemap.v *)
   Definition map_state (γ: ghost_names) (user_map: gmap K V) (hm: hash_map) : iProp Σ :=
     "Hauth_map" :: map_ctx γ.(map_name) 1 hm ∗
-    "Huser_map" :: ghost_var γ.(user_name) (DfracOwn (1/2)) user_map ∗
+    "Huser_map" :: own_ht_map γ user_map ∗
     "%Hflat" :: ⌜user_map = flatten hm⌝ ∗
     (* bucket correctness - if a key exists, then its in the correct bucket *)
-    "%Hbuckets" :: (⌜∀ h sub k, hm !! h = Some sub →
-                               uint.Z (hash_key k) = h →
-                               flatten hm !! k = sub !! k⌝) ∗
+    "%Hbuckets" ::     (⌜∀ h sub k,
+                         hm !! h = Some sub →
+                         uint.Z (hash_key k) = h →
+                         flatten hm !! k = sub !! k⌝) ∗
     "%Hbuckets_rev" ∷ (⌜∀ h sub k v,
                          hm !! h = Some sub →
                          sub !! k = Some v →
                          uint.Z (hash_key k) = h⌝).
 
+  #[global] Instance map_state_timeless γ user_map hm : Timeless (map_state γ user_map hm) := _.
+
+  (* this is usually only really needed once per function, so it's convenient if its bundled away *)
   Definition own_root
     (γ: ghost_names) (ht: loc) (rooti: loc) : iProp Σ :=
     "Hown_root" ∷ (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) ↦ᵥ
@@ -258,8 +292,8 @@ Section model.
   Definition ht_inv
     (γ: ghost_names) (ht: loc) : iProp Σ :=
     inv mapN (
-        "Hroot" ∷ (∃ root, "Hroot" ∷ own_root γ ht root) ∗
-        "Hmap" ∷ (∃ user_map hm, "Hmap" ∷ map_state γ user_map hm)
+        (∃ root,        (own_root γ ht root)) ∗
+        (∃ user_map hm, (map_state γ user_map hm))
       ).
 
   (* Public predicate exposed to clients. *)
@@ -309,7 +343,7 @@ Section model.
       else (init_tok γ false ∗
             (∃ (seed: w64),
                 ht ↦s[hashtriemap.HashTrieMap :: "seed"] seed) ∗
-            own_Value (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) 1 interface.nil
+            (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) ↦ᵥ interface.nil
            )%I.
 
   Definition init_mu `{!ghost_varG Σ bool}
@@ -332,7 +366,7 @@ Section model.
     iMod (ghost_var_alloc (∅ : gmap K V)) as (map_γ) "Hmap".
     iMod (ghost_var_alloc (∅ : gmap K V)) as (user_γ) "[Huser1 Huser2]".
     iModIntro.
-    iExists (mkNames map_γ init_γ user_γ).
+    iExists (mkNames init_γ map_γ user_γ).
     iFrame.
   Qed.
 
@@ -383,7 +417,7 @@ Section model.
   Lemma own_path_lookup h path γ q f :
     h ∈ path_to_domain path →
     own_path γ q path f -∗
-    ptsto_mut γ h q (f h) ∗ (ptsto_mut γ h q (f h) -∗ own_path γ q path f).
+    ptsto_mut γ.(map_name) h q (f h) ∗ (ptsto_mut γ.(map_name) h q (f h) -∗ own_path γ q path f).
   Proof.
     iIntros (Hdom) "Hpath".
     Local Transparent own_path.
@@ -517,9 +551,9 @@ Section model.
     let hm' := <[h := f' h]> hm in
     belongs_to_path path h →
     "Hctx" ∷ map_ctx γ.(map_name) 1 hm -∗
-    "Hpath" ∷ own_path γ.(map_name) 1 path f ==∗
+    "Hpath" ∷ own_path γ 1 path f ==∗
     "Hctx" ∷ map_ctx γ.(map_name) 1 hm' ∗
-    "Hpath" ∷ own_path γ.(map_name) 1 path f'.
+    "Hpath" ∷ own_path γ 1 path f'.
   Proof.
     intros ? ? ? Hbelongs.
     iIntros "? ?".
@@ -571,7 +605,7 @@ Section model.
   Lemma hm_lookup {h path γ m hm fn q} :
     h ∈ path_to_domain path →
     map_state γ m hm -∗
-    own_path γ.(map_name) q path fn -∗
+    own_path γ q path fn -∗
     ⌜hm !! h = Some (fn h)⌝.
   Proof.
     iIntros (Hdom) "Hmap_state Hown_path".
@@ -581,11 +615,23 @@ Section model.
     done.
   Qed.
 
+  Lemma entry_lookup {γ q k v m hm} :
+    map_state γ m hm -∗
+    own_entry γ q k v -∗
+    ⌜m !! k = Some v⌝.
+  Proof.
+    iIntros "Hmap_state Hentry".
+    iNamed "Hmap_state".
+    unfold own_entry, own_ht_map.
+    iDestruct (map_valid with "Huser_map Hentry") as %Hlookup.
+    done.
+  Qed.
+
   Lemma user_map_lookup {h path γ m hm fn q k} :
     h ∈ path_to_domain path →
     h = uint.Z (hash_key k) →
     map_state γ m hm -∗
-    own_path γ.(map_name) q path fn -∗
+    own_path γ q path fn -∗
     ⌜m !! k = (fn h) !! k⌝.
   Proof.
     iIntros (Hdom Hh) "Hmap_state Hown_path".
@@ -601,64 +647,56 @@ Section model.
   Proof.
     iIntros "Hmap_state Huser_map2".
     iNamed "Hmap_state".
-    iDestruct (ghost_var_agree with "Huser_map Huser_map2") as %Hx.
+    iDestruct (map_ctx_agree with "Huser_map Huser_map2") as %Hx.
     done.
   Qed.
 
-  Lemma map_state_update {γ path hm user_map user_map2 f} key value :
-    let h  := uint.Z (hash_key key) in
+  Lemma map_state_insert
+    {γ path hm user_map user_map2 f h} key value
+    (Hhash : h  = uint.Z (hash_key key))
+    (Hnone : user_map !! key = None)
+    (Hbelongs : belongs_to_path path h) :
     let f' := (λ h', if decide (h' = h) then <[key:=value]>(f h) else f h') in
     let um' := <[key:=value]> user_map in
     let hm' := <[h := (<[key:=value]>) (f h)]> hm in
-    belongs_to_path path h →
     "Hmap" ∷ map_state γ user_map hm ∗
     "Huser_map2" ∷ own_ht_map γ user_map2 ∗
-    "Hpath" ∷ own_path γ.(map_name) 1 path f ==∗
+    "Hpath" ∷ own_path γ 1 path f ==∗
     "Hmap" ∷ map_state γ um' hm' ∗
     "Huser_map2" ∷ own_ht_map γ um' ∗
-    "Hpath" ∷ own_path γ.(map_name) 1 path f'.
+    "Hpath" ∷ own_path γ 1 path f' ∗
+    "Hentry" ∷ own_entry γ 1 key value.
   Proof.
     intros.
-    rename H into Hbelongs.
     iIntros "Hx".
     iNamed "Hx".
     iNamed "Hmap".
+    unfold own_ht_map.
 
-    have Hdom : h ∈ path_to_domain path by apply (in_domain _ (hash_key key)).
+    have Hdom : h ∈ path_to_domain path by apply (in_domain path (hash_key key)).
     iDestruct (own_path_lookup h _ _ _ _ Hdom with "Hpath") as "[Hptsto Hptsto_close]".
     iDestruct (map_valid with "Hauth_map Hptsto") as %Hlookup.
     iDestruct ("Hptsto_close" with "Hptsto") as "Hpath".
 
-    iMod (ghost_var_update_halves (<[key:=value]> user_map) with "Huser_map Huser_map2") as "[Huser_map Huser_map2]".
-    iMod (own_path_update_key key value _ _ _ _ Hbelongs with "Hauth_map Hpath") as "(Hauth_map & Hpath)".
+    iDestruct (map_ctx_agree with "Huser_map Huser_map2") as %Hagree.
+    subst user_map2.
+
+    iCombine "Huser_map Huser_map2" as "Huser_map".
+    iMod (map_alloc key value Hnone with "Huser_map") as "[Huser_map Hentry]".
+    iDestruct "Huser_map" as "[Huser_map Huser_map2]".
+
     subst h.
+    iMod (own_path_update_key key value _ _ _ _ Hbelongs with "Hauth_map Hpath") as "(Hauth_map & Hpath)".
+
     set (h := uint.Z (hash_key key)) in *.
     iNamed.
 
     iEval (rewrite decide_True) in "Hctx".
     set (old := f h) in *.
 
-    (* have Hhm' : hm' = (<[h := <[key:=value]> old]> hm). *)
-    (* { *)
-    (*   apply map_eq; intro h'. *)
-    (*   destruct (decide (h' = h)) as [->|Hneq]. *)
-    (*   - rewrite lookup_insert. rewrite decide_True; [|reflexivity]. *)
-    (*     rewrite lookup_insert. rewrite decide_True; [|reflexivity]. *)
-    (*     subst f'. *)
-    (*     simpl. *)
-    (*     rewrite decide_True; [|reflexivity]. *)
-    (*     reflexivity. *)
-    (*   - rewrite lookup_insert_ne; [|done]. *)
-    (*     rewrite lookup_insert_ne; [|done]. *)
-    (*     reflexivity. *)
-    (* } *)
-
-    (* iEval (rewrite -Hhm') in "Hctx". *)
     iFrame.
 
     iPureIntro.
-
-    (* clear Hhm'. *)
 
     assert (Hum' : (um' = flatten hm')).
     {
@@ -666,7 +704,6 @@ Section model.
       subst um' hm'.
       symmetry.
       subst user_map.
-      (* rewrite decide_True; [|reflexivity]. *)
       apply (flatten_update_update hm h key value old).
       - exact Hlookup.
       - reflexivity.
@@ -686,7 +723,6 @@ Section model.
       destruct (decide (h0 = h)) as [->|Hneq].
       - rewrite lookup_insert in Hhm'.
         rewrite decide_True in Hhm'; [|reflexivity].
-        (* rewrite decide_True in Hhm'; [|reflexivity]. *)
         inversion Hhm'; subst sub; clear Hhm'.
         destruct (decide (k = key)) as [->|Hk].
         + rewrite lookup_insert. rewrite lookup_insert.
@@ -715,8 +751,6 @@ Section model.
       subst f'.
       subst hm'.
       simpl in *.
-      (* rewrite decide_True in Hum'; [|reflexivity]. *)
-      (* rewrite decide_True; [|reflexivity]. *)
       intros.
       destruct (decide (h0 = h)) as [->|Hneq].
       - rewrite lookup_insert in H.
@@ -730,5 +764,7 @@ Section model.
         eapply Hbuckets_rev; eauto.
     }
   Qed.
+
+  #[global] Opaque map_state.
 
 End model.

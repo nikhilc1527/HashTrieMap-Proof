@@ -65,14 +65,17 @@ Section model.
 
   Lemma in_domain p (k: w64) h :
     h = uint.Z k →
-    belongs_to_path p h → h ∈ path_to_domain p.
+    belongs_to_path p h ↔ h ∈ path_to_domain p.
   Proof.
     intros.
     unfold path_to_domain.
     rewrite list_elem_of_filter.
     split.
-    - exact H0.
-    - apply elem_of_seqZ; word.
+    - intros.
+      split; [exact H0|].
+      apply elem_of_seqZ; word.
+    - intros [Hbelong Hfull].
+      exact Hbelong.
   Qed.
 
   Lemma path_to_prefix_snoc (p : path) (n : nibble) :
@@ -87,7 +90,6 @@ Section model.
   Qed.
 
   (* (* TODO: replace all the 4's with hashtriemap.nChildrenLog2, 16 with hashtriemap.nChildren *) *)
-
 
   Lemma sh_snoc (p : path) (n : nibble) :
     sh (p ++ [n]) = sh p - 4.
