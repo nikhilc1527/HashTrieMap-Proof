@@ -9,10 +9,13 @@ From Perennial.algebra Require Import auth_map.
 From Perennial.base_logic.lib Require Import invariants.
 From Perennial.Helpers Require Import NamedProps.
 Import named_props_ascii_notation.
-From Perennial.algebra Require Import ghost_var.
+From New.ghost Require Import ghost_var.
 
 From New.proof.hashtriemap Require Import aux.
 From New.proof.hashtriemap Require Export paths.
+
+From Stdlib Require Import ZArith List.
+(* From stdpp Require Import base. *)
 
 Open Scope Z_scope.
 
@@ -33,7 +36,7 @@ Section model.
                             user_name : gname;
                           }.
 
-  (* just to be clear, and to not get confused with w64's everywhere *)
+  (* discount generics *)
   Definition K : Type := w64.
   Definition V : Type := w64.
   #[global] Instance K_inhab : Inhabited K := _.
@@ -42,10 +45,11 @@ Section model.
   Parameter hash_key : K → w64.
 
   Context `{hG: heapGS Σ, !ffi_semantics _ _}
-    `{!globalsGS Σ, !ghost_varG Σ (gmap w64 w64)}
+    {sem: go.Semantics}.
+
+  Context `{!globalsGS Σ, !ghost_varG Σ (gmap w64 w64)}
     `{!mapG Σ K V}
-    `{!mapG Σ Z (gmap K V)}
-    {go_ctx: GoContext}.
+    `{!mapG Σ Z (gmap K V)}.
 
   Definition hash_map : Type := gmap Z (gmap K V).
 
@@ -114,10 +118,10 @@ Section model.
     (e: loc) (path: path)
     : iProp Σ :=
     ∃ (next: loc) (k: K) (v: V) (h: Z),
-      "#Hk" :: e ↦s[hashtriemap.entry :: "key"]□ k ∗
-      "#Hv" :: e ↦s[hashtriemap.entry :: "value"]□ v ∗
-      "Hown_next" :: (struct.field_ref_f hashtriemap.entry "overflow" e) ↦ᵥ{q}
-        (interface.mk (ptrT.id hashtriemap.entry.id) #next) ∗
+      "#Hk" :: e.[hashtriemap.entry.t, "key"]   ↦□ k ∗
+      "#Hv" :: e.[hashtriemap.entry.t, "value"] ↦□ v ∗
+      "Hown_next" :: e.[hashtriemap.entry.t, "overflow"] ↦ᵥ{q}
+                        (interface.ok (interface.mk (go.PointerType hashtriemap.entry) #next)) ∗
       "Hown_entry" ∷ own_entry γ q k v ∗
       "%Hhash" :: ⌜uint.Z (hash_key k) = h⌝ ∗
       "%Hbelongs" :: ⌜belongs_to_path path h⌝ ∗
@@ -159,8 +163,8 @@ Section model.
     ∃ ind,
       "%Hchild_path_len" ∷ ⌜length child_path < 16⌝ ∗
       "%Hchild_not_null" ∷ ⌜ind ≠ null⌝ ∗
-      "#Hchild_ind_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ind"]□ ind ∗
-      "#Hchild_ent_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ent"]□ null ∗
+      "#Hchild_ind_ptr" ∷ nodeptr.[hashtriemap.node.t, "ind"] ↦□ ind ∗
+      "#Hchild_ent_ptr" ∷ nodeptr.[hashtriemap.node.t, "ent"] ↦□ null ∗
       "#Hchild_ind" ∷ ▷ child_indirect ind child_path.
 
   Definition entry_node
@@ -170,8 +174,8 @@ Section model.
     ∃ ent map hash,
       "Hown_path" ∷ own_path γ q path (singleton_map_fn hash map) ∗
       "%Hchild_not_null" ∷ ⌜ent ≠ null⌝ ∗
-      "#Hchild_ent_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ent"]□ ent ∗
-      "#Hchild_ind_ptr" ∷ nodeptr ↦s[hashtriemap.node :: "ind"]□ null ∗
+      "#Hchild_ent_ptr" ∷ nodeptr.[hashtriemap.node.t, "ent"] ↦□ ent ∗
+      "#Hchild_ind_ptr" ∷ nodeptr.[hashtriemap.node.t, "ind"] ↦□ null ∗
       "#Hchild_entry" ∷ entry γ q ent path.
 
   (* definition of node *)
@@ -184,7 +188,7 @@ Section model.
       "Hchild" ∷ own_path γ q child_path empty_map_fn
     else
       (∃ (is_entry: bool),
-          "#Hnode_is_entry" ∷ nodeptr ↦s[hashtriemap.node :: "isEntry"]□ is_entry ∗
+          "#Hnode_is_entry" ∷ nodeptr.[hashtriemap.node.t, "isEntry"] ↦□ is_entry ∗
           "Hchild" ∷
             (if is_entry then
                entry_node γ q nodeptr child_path
@@ -196,11 +200,12 @@ Section model.
     (γ: ghost_names) (q: Qp) (children_slice: slice.t)
     (children_vals: list atomic.Value.t)
     (ind: loc) (path: path) : iProp Σ :=
-    "Hchildren" :: [∗ list] i ↦ val ∈ children_vals,
+    "Hchildren" :: [∗ list] i_ ↦ val ∈ children_vals,
+      let i := Z.of_nat i_ in
       ∃ (nodeptr: loc),
-        "Hown_child" :: (slice.elem_ref_f children_slice atomic.Value i) ↦ᵥ{q}
-          (interface.mk (ptrT.id hashtriemap.node.id) #nodeptr) ∗
-        "Hchild" :: childP child_indirect γ q nodeptr path (path ++ [Z.of_nat i]).
+        "Hown_child" :: (slice.slice_index_ref atomic.Value.t i children_slice) ↦ᵥ{q}
+          (interface.ok (interface.mk (go.PointerType hashtriemap.node) #nodeptr)) ∗
+        "Hchild" :: childP child_indirect γ q nodeptr path (path ++ [i]).
 
   (* split 50/50 between an invariant and the mutex to allow for lock-free reads *)
   (* we always have read permission on any indirect, but only can write if we acquire the lock *)
@@ -211,14 +216,14 @@ Section model.
     : loc -d> (list Z) -d> iProp Σ :=
     λ ind path,
       (∃ (children_vals: list atomic.Value.t) (children_slice: slice.t),
-          "#Hown_children" :: ind ↦s[hashtriemap.indirect :: "children"]□ children_slice ∗
+          "#Hown_children" :: ind.[hashtriemap.indirect.t, "children"] ↦□ children_slice ∗
           "#Hchildren_slice" :: children_slice ↦*□ children_vals ∗
           "%Hchildren_len" :: ⌜length children_vals = 16%nat⌝ ∗
           "#Hind_inv" :: inv (indN) ((childrenP indirect γ (1/2) children_slice children_vals ind path)) ∗
-          "#Hind_mutex" :: is_Mutex (struct.field_ref_f hashtriemap.indirect "mu" ind) (
+          "#Hind_mutex" :: is_Mutex ind.[hashtriemap.indirect.t, "mu"] (
               (* dont need to split dead between inv and mutex because its only used for modification of the tree *)
               ∃ (dead: bool),
-                "Hdead" ∷ own_Bool (struct.field_ref_f hashtriemap.indirect "dead" ind) (DfracOwn 1) dead ∗
+                "Hdead" ∷ own_Bool ind.[hashtriemap.indirect.t, "dead"] (DfracOwn 1) dead ∗
                 "Hmu_inv" ∷ ((* ⌜dead = false⌝ -∗ *) childrenP indirect γ (1/2) children_slice children_vals ind path)))%I.
 
   (* Prove contractiveness *)
@@ -285,8 +290,8 @@ Section model.
   (* this is usually only really needed once per function, so it's convenient if its bundled away *)
   Definition own_root
     (γ: ghost_names) (ht: loc) (rooti: loc) : iProp Σ :=
-    "Hown_root" ∷ (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) ↦ᵥ
-      (interface.mk (ptrT.id hashtriemap.indirect.id) #rooti) ∗
+    "Hown_root" ∷ ht.[hashtriemap.HashTrieMap.t, "root"] ↦ᵥ
+                       (interface.ok (interface.mk (go.PointerType hashtriemap.indirect) #rooti)) ∗
     "#Hroot_indirect" ∷ indirect γ rooti [].
 
   Definition ht_inv
@@ -299,7 +304,7 @@ Section model.
   (* Public predicate exposed to clients. *)
   Definition is_hashtriemap
     (γ: ghost_names) (ht: loc) : iProp Σ :=
-    ("#Hseed" :: ∃ (seed: w64), ht ↦s[hashtriemap.HashTrieMap :: "seed"]□ seed) ∗
+    ("#Hseed" :: ∃ (seed: w64), ht.[hashtriemap.HashTrieMap.t, "seed"] ↦□ seed) ∗
     "#His_map" :: ht_inv γ ht.
 
   Definition ht_au_mask : coPset :=
@@ -309,12 +314,12 @@ Section model.
   Definition ht_load_ret (m: gmap K V) (key: K) : val :=
     (match m !! key with
     | Some v => (#v, #true)
-    | None => (#(default_val V), #false)
+    | None => (#(zero_val V), #false)
     end)%V.
 
   (* designed to be split between an invariant and a mutex, so that reading can be done outside of the critical section and writing can only be done inside *)
   Definition init_tok `{!ghost_varG Σ bool} (γ: ghost_names) (b: bool) : iProp Σ :=
-    ghost_var γ.(init_name) (DfracOwn (1/2)) b.
+    ghost_var γ.(init_name) (1/2)%Qp b.
 
   Definition init_status_done
     (γ: ghost_names) (ht: loc) (b: bool) : iProp Σ :=
@@ -324,7 +329,7 @@ Section model.
     `{!ghost_varG Σ bool}
     (ht: loc) (γ: ghost_names) : iProp Σ :=
     ∃ (b: bool),
-      own_Uint32 (struct.field_ref_f hashtriemap.HashTrieMap "inited" ht) 1
+      own_Uint32 ht.[hashtriemap.HashTrieMap.t, "inited"] 1
         (if b then W32 1 else W32 0) ∗
       init_tok γ b ∗
       □ init_status_done γ ht b.
@@ -342,13 +347,13 @@ Section model.
       then init_tok γ true
       else (init_tok γ false ∗
             (∃ (seed: w64),
-                ht ↦s[hashtriemap.HashTrieMap :: "seed"] seed) ∗
-            (struct.field_ref_f hashtriemap.HashTrieMap "root" ht) ↦ᵥ interface.nil
+                ht.[hashtriemap.HashTrieMap.t, "seed"] ↦ seed) ∗
+            ht.[hashtriemap.HashTrieMap.t, "root"] ↦ᵥ interface.nil
            )%I.
 
   Definition init_mu `{!ghost_varG Σ bool}
     (ht: loc) (γ: ghost_names) : iProp Σ :=
-    is_Mutex (struct.field_ref_f hashtriemap.HashTrieMap "initMu" ht)
+    is_Mutex ((ht.[hashtriemap.HashTrieMap.t, "initMu"]))
       (init_mu_inv ht γ).
 
   Definition hashtriemap_init
@@ -372,36 +377,27 @@ Section model.
 
   Lemma hashtriemap_zero_init
     `{!mapG Σ Z (gmap K V), !mapG Σ K V, !ghost_varG Σ (gmap w64 w64), !ghost_varG Σ bool}
+    {sync_sem : sync.Assumptions}
     (ht: loc) E (P: gmap w64 w64 → iProp Σ) :
-    ht ↦ default_val hashtriemap.HashTrieMap.t ={E}=∗
+    ht ↦ zero_val hashtriemap.HashTrieMap.t ={E}=∗
     ∃ γ, hashtriemap_init ht γ.
   Proof.
     iIntros "Hht".
-    iDestruct (struct_fields_split with "Hht") as "Hfields".
+    iDestruct (typed_pointsto_split with "Hht") as "Hfields".
     iNamed "Hfields".
     simpl.
     iMod (hashtriemap_pre_auth_init) as (γ) "(Htok1 & Htok2)".
 
-    iApply struct_fields_split in "Hinited".
-    iNamed "Hinited".
-    iDestruct (Uint32_unfold with "Hv") as "Hinited".
-    iClear "H_0".
-
-    iApply struct_fields_split in "Hroot".
-    iNamed "Hroot".
-    simpl.
-    iDestruct (Value_unfold with "Hv") as "Hroot".
-
-    iMod (inv_alloc init_statusN _ (init_status_inv ht γ) with "[Htok1 Hinited]") as "#Hinit".
+    iMod (inv_alloc init_statusN _ (init_status_inv ht γ) with "[Htok1 inited]") as "#Hinit".
     {
       iNext.
       iExists false.
       iFrame.
       done.
     }
-    set (m := struct.field_ref_f hashtriemap.HashTrieMap "initMu" ht).
+    set (m := ht.[hashtriemap.HashTrieMap.t, "initMu"]).
 
-    iMod (init_Mutex (init_mu_inv ht γ) E m with "HinitMu [Htok2 Hseed Hroot]") as "Hmutex".
+    iMod (init_Mutex (init_mu_inv ht γ) E m with "initMu [Htok2 seed root]") as "Hmutex".
     {
       iNext.
       iExists false.
@@ -555,6 +551,7 @@ Section model.
     "Hctx" ∷ map_ctx γ.(map_name) 1 hm' ∗
     "Hpath" ∷ own_path γ 1 path f'.
   Proof.
+    Local Transparent domain.
     intros ? ? ? Hbelongs.
     iIntros "? ?".
     iNamed.
@@ -565,10 +562,14 @@ Section model.
       [apply full_domain_elem|exact Hbelongs].
     unfold own_path, own_domain.
     set (dom := path_to_domain path) in *.
-    have Hnodup : NoDup dom by apply dom_no_dup.
+    have Hnodup : base.NoDup dom by apply dom_no_dup.
+    (* apply NoDup_ListNoDup in Hnodup. *)
     iInduction dom as [|h' dom] "IH".
     { rewrite elem_of_nil in Hdom. done. }
-    apply NoDup_cons in Hnodup as [Hnotin Hnodup].
+    (* Set Printing All. *)
+    apply NoDup_ListNoDup in Hnodup.
+    (* Check NoDup_cons. *)
+    apply NoDup_cons_iff in Hnodup as [Hnotin Hnodup].
     simpl.
     iDestruct "Hpath" as "[Hh Hpath]".
     rewrite elem_of_cons in Hdom.
@@ -588,8 +589,11 @@ Section model.
       intro Heq.
       subst.
       apply Hnotin.
-      apply (list_elem_of_lookup_2 _ _ _ Hy).
-    - iSpecialize ("IH" $! Hdom Hnodup with "Hctx Hpath").
+      apply (list_elem_of_lookup_2) in Hy.
+      apply list_elem_of_In in Hy.
+      done.
+    - apply NoDup_ListNoDup in Hnodup.
+      iSpecialize ("IH" $! Hdom Hnodup with "Hctx Hpath").
       iMod "IH".
       iModIntro.
       iDestruct "IH" as "(Hctx & Hpath)".
@@ -597,6 +601,7 @@ Section model.
       iFrame.
       subst f'.
       simpl.
+      rewrite -list_elem_of_In in Hnotin.
       have Hneq : h' ≠ h by intros Heq; subst h'; exact (Hnotin Hdom).
       rewrite (decide_False _ _ Hneq).
       iFrame.
@@ -694,7 +699,7 @@ Section model.
     iEval (rewrite decide_True) in "Hctx".
     set (old := f h) in *.
 
-    iFrame.
+    iFrame "Huser_map Huser_map2 Hentry Hctx Hpath".
 
     iPureIntro.
 

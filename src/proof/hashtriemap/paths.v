@@ -1,9 +1,10 @@
 From Perennial Require Import base.
 From Perennial.Helpers Require Import Automation Integers.
-From Stdlib Require Import ZArith.
 From stdpp Require Import prelude gmap list fin_maps.
 
 From stdpp Require Import ssreflect.
+
+(* From Stdlib Require Import ZArith List. *)
 
 Open Scope Z_scope.
 Coercion Z.of_nat : nat >-> Z.
@@ -41,8 +42,9 @@ Section model.
   Qed.
 
   Definition path_to_domain (p : path) : domain :=
-    base.filter
+    filter
       (belongs_to_path p)
+      (* (λ x, bool_decide (belongs_to_path p x)) *)
       (full_domain).
   #[global] Opaque path_to_domain.
 

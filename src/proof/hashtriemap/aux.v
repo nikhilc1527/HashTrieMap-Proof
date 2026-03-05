@@ -7,7 +7,7 @@ From New.proof Require Import sync.
 From New.proof.sync Require Import atomic.
 From New.proof.sync_proof Require Import mutex.
 From Perennial.algebra Require Import auth_map.
-From Perennial.algebra Require Import ghost_var.
+From New.ghost Require Import ghost_var.
 From Perennial.Helpers Require Import NamedProps.
 Export named_props_ascii_notation.
 From Perennial.Helpers.Word Require Import Integers.
@@ -23,8 +23,8 @@ Open Scope Z_scope.
 (* From Perennial.goose_lang.lib Require Export atomic.impl. *)
 
 Section aux.
-  Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
-    `{!globalsGS Σ} {go_ctx: GoContext}.
+  Context `{hG: heapGS Σ, !ffi_semantics _ _}.
+  Context {sem: go.Semantics}.
 
   (* Parameter atomic_value_model : atomic.Value.t → option loc → Prop. *)
 
@@ -40,69 +40,42 @@ Notation "l ↦ᵥ v" := (own_Value l (DfracOwn 1) v)
                              (at level 20, format "l  ↦ᵥ  v").
 
 Section aux.
-  Context `{hG: heapGS Σ, !invGS Σ, !ffi_semantics _ _}
-    `{!globalsGS Σ} {go_ctx: GoContext}.
+  Context `{hG: heapGS Σ, !ffi_semantics _ _}.
+  Context {sem : go.Semantics}.
 
   Implicit Types l : loc.
   Implicit Types u : loc.
   Implicit Types v : interface.t.
 
-  Lemma Value_unfold l dq v :
-    l ↦ᵥ{dq} v ⊣⊢
-    l ↦s[atomic.Value :: "v"]{DfracOwn dq} v.
-  Proof.
-    iSplit.
-    - iIntros "H".
-      iApply struct_fields_split in "H". iNamed "H".
-      iFrame.
-    - iIntros "Hv".
-      iApply @struct_fields_combine.
-      iFrame "Hv".
-  Qed.
-
-  Lemma own_Value_agree l dq1 dq2 v1 v2 :
-    l ↦ᵥ{dq1} v1 -∗
-    l ↦ᵥ{dq2} v2 -∗
-    ⌜v1 = v2⌝.
-  Proof.
-    iIntros "H1 H2".
-    iCombine "H1 H2" gives %[? ?].
-    inversion H0.
-    done.
-  Qed.
-
-  Global Instance own_Uint64_fractional u v : Fractional (λ q, u ↦ᵥ{q} v) := _.
-  Global Instance own_Uint64_as_fractional u q v :
+  Global Instance own_Value_fractional u v : Fractional (λ q, u ↦ᵥ{q} v).
+  Proof. apply fractional_of_dfractional. apply _. Qed.
+  Global Instance own_Value_as_fractional u q v :
     AsFractional (u ↦ᵥ{q} v) (λ q, u↦ᵥ{q} v) q := _.
 
-  (* Using in place of perennial's, since perennial doesnt have std library proofs for atomic Values yet *)
-  Lemma wp_Value__Store u v :
-    ∀ Φ,
-    is_pkg_init atomic -∗
-    (|={⊤,∅}=> ▷ ∃ old, u ↦ᵥ{1} old ∗ (u ↦ᵥ{1} v ={∅,⊤}=∗ Φ #())) -∗
-    WP u @ (ptrT.id atomic.Value.id) @ "Store" #v {{ Φ }}.
+  Global Instance own_Value_combines_gives u v v' dq dq' :
+    CombineSepGives (own_Value u dq v) (own_Value u dq' v') (⌜ v = v'⌝).
   Proof.
-  Admitted.
+    unfold CombineSepGives.
+    iIntros "?". iDestruct (combine_sep_gives with "[$]") as "H".
+    iDestruct "H" as %?. iModIntro. iPureIntro.
+    assert (v = v') by congruence.
+    done.
+  Qed.
 
   Lemma wp_Value__Load u dq :
     ∀ Φ,
     is_pkg_init atomic -∗
     (|={⊤,∅}=> ▷ ∃ v, u ↦ᵥ{dq} v ∗ (u ↦ᵥ{dq} v ={∅,⊤}=∗ Φ #v)) -∗
-    WP u @ (ptrT.id atomic.Value.id) @ "Load" #() {{ Φ }}.
+    WP u @! (go.PointerType atomic.Value) @! "Load" #() {{ Φ }}.
   Proof.
   Admitted.
 
-  (* theres probably already something for this but i couldnt find it *)
-  Lemma own_slice_len_keep `{!IntoVal V} `{!IntoValTyped V t} (s: slice.t) dq (vs: list V) :
-    s ↦*{dq} vs -∗ s ↦*{dq} vs ∗
-    ⌜length vs = sint.nat s.(slice.len_f) ∧ 0 ≤ sint.Z s.(slice.len_f)⌝.
+  Lemma wp_Value__Store u v :
+    ∀ Φ,
+    is_pkg_init atomic -∗
+    (|={⊤,∅}=> ▷ ∃ old, u ↦ᵥ{1} old ∗ (u ↦ᵥ{1} v ={∅,⊤}=∗ Φ #())) -∗
+    WP u @! (go.PointerType atomic.Value) @! "Store" #v {{ Φ }}.
   Proof.
-    iIntros "Hs".
-    rewrite own_slice_unseal.
-    iDestruct "Hs" as "[Hs %Hlen]".
-    iFrame "Hs".
-    iPureIntro.
-    split; word.
-  Qed.
+  Admitted.
 
 End aux.
