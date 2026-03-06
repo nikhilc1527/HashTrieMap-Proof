@@ -38,70 +38,57 @@ Section proof.
   #[global] Instance : IsPkgInit (iProp Σ) hashtriemap := define_is_pkg_init True%I.
   #[global] Instance : GetIsPkgInitWf (iProp Σ) hashtriemap := build_get_is_pkg_init_wf.
 
-  Lemma next_nibble_eq (key: w64) (path: path) {shift} :
+  Lemma next_nibble_eq (key: w64) (path: path) :
     let h := uint.Z (hash_key key) in
-    let n := w64_word_instance.(word.and)
-                                 (w64_word_instance.(word.sru) (hash_key key)
-                                                      (w64_word_instance.(word.sub) shift (W64 4)))
-                                 (W64 15) in
-    length path < 16 → uint.Z shift = sh path → uint.Z n = Z.land (h ≫ (sh path - 4)) 15.
+    let n := (w64_word_instance.(word.and)
+                                  (w64_word_instance.(word.sru) (hash_key key)
+                                                       (w64_word_instance.(word.sub) (W64 (sh path)) (W64 4)))
+                                  (W64 15)) in
+    length path < 16 → sint.Z n = Z.land (h ≫ (sh path - 4)) 15.
   Proof.
     intros.
-    (* subst n. *)
-    (* zify. *)
     unfold h.
-    rewrite word.unsigned_and_nowrap.
-    rewrite word.unsigned_sru.
-    - rewrite word.unsigned_sub.
+    subst n.
+    rewrite sint_eq_uint.
+    - rewrite word.unsigned_and_nowrap.
       f_equiv; [|word].
-      unfold sh.
-      rewrite wrap_small; auto.
-      + f_equiv.
-        rewrite H0.
+      rewrite word.unsigned_sru.
+      + rewrite word.unsigned_sub.
         unfold sh.
-        word.
-      + replace (uint.Z (W64 (64 - 4 * length path))) with (64 - 4 * length path) by word.
-        replace (uint.Z (W64 4)) with 4 by word.
-        replace (w64_word_instance_ok.(word.wrap) (64 - 4 * length path - 4)) with (64 - 4 * length path - 4) by word.
-        unfold sh in *.
-        have Hx : ((64 - 4 * length path - 4)) ≥ 0 by lia.
-        have Hrng : 0 ≤ uint.Z (hash_key key) < 2^64 by word.
-        split.
-        * apply Z.shiftr_nonneg. lia.
-        * destruct Hrng as [_ Hrng].
-          apply (Z.le_lt_trans _ (uint.Z (hash_key key))); [|exact Hrng].
-          set x := uint.Z (hash_key key).
-          rewrite Z.shiftr_div_pow2; [|word].
-          apply Z.div_le_upper_bound; [word|].
-          set z := 2 ^ (64 - 4 * length path - 4).
-          have Hz : 1 ≤ z.
-          {
-            replace 1 with (2^0) by lia.
-            apply Z.pow_le_mono_r; lia.
-          }
-          replace (z * x) with (x * z) by lia.
-          clear Hx.
-          have Hx : 0 ≤ x by word.
-          have Hy : 1 ≤ z by lia.
-          have : x * 1 ≤ x * z.
-          { apply (Z.mul_le_mono_nonneg_l _ _ _ Hx).
-            exact Hy. }
-          rewrite H0.
+        rewrite wrap_small; auto.
+        * f_equiv.
           unfold sh.
-          replace (2 ^ w64_word_instance_ok.(word.wrap) (64 - 4 * length path - 4)) with z.
-          2: {
-            unfold z.
-            f_equiv.
-            word.
-          }
           word.
-    - replace (w64_word_instance.(word.sub) (W64 (sh path)) (W64 4)) with (W64 (sh path - 4)) by word.
-      unfold sh.
-      replace (uint.Z (W64 (64 - 4 * length path - 4))) with (64 - 4 * length path - 4) by word.
-      replace (w64_word_instance.(word.sub) shift (W64 4)) with (W64 (uint.Z shift - 4)) by word.
-      rewrite H0.
-      unfold sh.
-      word.
+        * replace (uint.Z (W64 (64 - 4 * length path))) with (64 - 4 * length path) by word.
+          replace (uint.Z (W64 4)) with 4 by word.
+          replace (w64_word_instance_ok.(word.wrap) (64 - 4 * length path - 4)) with (64 - 4 * length path - 4) by word.
+          unfold sh in *.
+          have Hx : ((64 - 4 * length path - 4)) ≥ 0 by lia.
+          have Hrng : 0 ≤ uint.Z (hash_key key) < 2^64 by word.
+          split.
+          -- apply Z.shiftr_nonneg. lia.
+          -- destruct Hrng as [_ Hrng].
+             apply (Z.le_lt_trans _ (uint.Z (hash_key key))); [|exact Hrng].
+             set x := uint.Z (hash_key key).
+             rewrite Z.shiftr_div_pow2; [|word].
+             apply Z.div_le_upper_bound; [word|].
+             assert ((2 ^ (64 - 4 * length path - 4)) > 0) by lia.
+             replace x with (x * 1) at 1 by lia.
+             replace (2 ^ (64 - 4 * length path - 4) * x) with (x * 2 ^ (64 - 4 * length path - 4)) by lia.
+             apply Zmult_le_compat_l; word.
+      + rewrite word.unsigned_sub.
+        unfold sh.
+        replace (uint.Z (W64 (64 - 4 * length path))) with (64 - 4 * length path) by word.
+        replace (uint.Z (W64 4)) with 4 by word.
+        word.
+    - rewrite word.unsigned_and.
+      set x := (uint.Z (w64_word_instance.(word.sru) (hash_key key)
+                                            (w64_word_instance.(word.sub) (W64 (sh path)) (W64 4)))).
+      replace (uint.Z (W64 15)) with 15 by word.
+      replace 15 with (Z.ones 4) by reflexivity.
+      rewrite Z.land_ones; [|lia].
+      pose proof (Z_mod_lt x (2 ^ 4)).
+      rewrite wrap_small; lia.
   Qed.
 
   Lemma wp_node__entry (n: loc) (e: loc) :
@@ -210,7 +197,7 @@ Section proof.
       iDestruct (map_state_agree with "Hmap Hown") as %Heq.
       subst m.
 
-      have Hdom : h ∈ path_to_domain path by apply (in_domain _ (hash_key key)).
+      have Hdom : h ∈ path_to_domain path by rewrite -in_domain.
 
       have Hh : h = uint.Z (hash_key key) by reflexivity.
       iDestruct (entry_lookup with "Hmap Hown_entry") as %Hsome.
@@ -291,7 +278,7 @@ Section proof.
         iDestruct (map_state_agree with "Hmap Hown") as %Heq.
         subst m.
 
-        have Hdom : h ∈ path_to_domain path by apply (in_domain _ (hash_key key)).
+        have Hdom : h ∈ path_to_domain path by rewrite -in_domain.
 
         have Hh : h = uint.Z (hash_key key) by reflexivity.
         iDestruct (entry_lookup with "Hmap Hown_entry0") as %Hsome.
@@ -767,9 +754,11 @@ Section proof.
       iFrame "#".
     - iApply "HΦ".
       iFrame.
+      unfold is_hashtriemap.
+      simpl in n.
       destruct b; simpl.
       + iFrame "#".
-      + exfalso. congruence.
+      + congruence.
   Qed.
 
   Lemma wp_load_root γ (ht: loc) :
@@ -842,11 +831,11 @@ Section proof.
 
     set h := uint.Z (hash_key key).
 
-    iAssert (∃ (path: path) (shift: w64) (cur: loc),
+    iAssert (∃ (path: path) (shift: Z) (cur: loc),
                 "Hcur" :: i_ptr ↦ cur ∗
-                "Hhash_shift" :: hashShift_ptr ↦ shift ∗
+                "Hhash_shift" :: hashShift_ptr ↦ W64 shift ∗
                 "#Hi_indirect" :: indirect γ cur path ∗
-                "%Hshift" :: ⌜uint.Z shift = sh path⌝ ∗
+                "%Hshift" :: ⌜shift = sh path⌝ ∗
                 "%Hpath_len" :: ⌜length path < 16⌝ ∗
                 "%Hkey_path" :: ⌜belongs_to_path path h⌝
             )%I with ("[$Hroot_indirect $hashShift $i]") as "Hloop_inv".
@@ -867,64 +856,33 @@ Section proof.
 
     wp_if_destruct.
     {
-      (* panic case *)
-      (* wp_apply wp_panic ? *)
-      unfold sh in Hshift.
+      unfold sh in e.
       exfalso.
       word.
     }
 
     iDestruct (own_slice_len with "Hchildren_slice") as %Hlen_children.
-    (* have Hlen_children : uint.Z children_slice.(slice.len) = 16. *)
-    (* { word. } *)
-    (* clear Hlen_children_16. *)
 
-    rewrite decide_True.
-    2: {
-      have Hlen16 : uint.Z children_slice.(slice.len) = 16 by word.
-      set (x := (w64_word_instance.(word.sru) (hash_key key)
-            (w64_word_instance.(word.sub) shift (W64 4)))).
-      have Hnib_u : 0 ≤ uint.Z (w64_word_instance.(word.and) x (W64 15)) < 16.
-      {
-        rewrite word.unsigned_and_nowrap.
-        change (uint.Z (W64 15)) with 15.
-        change 15 with (Z.ones 4).
-        rewrite Z.land_ones; word.
-      }
-      have Hsint :
-        sint.Z (w64_word_instance.(word.and) x (W64 15)) =
-        uint.Z (w64_word_instance.(word.and) x (W64 15)).
-      { word. }
-      rewrite Hsint.
+    rewrite next_nibble_eq; [|exact Hpath_len].
+    set next_nibble := (Z.land (uint.Z (hash_key key) ≫ (sh path - 4)) 15).
+    replace (sint.Z children_slice.(slice.len)) with 16 by word.
+
+    have Hnib_u : 0 ≤ next_nibble < 16.
+    {
+      subst next_nibble.
+      replace 15 with (Z.ones 4) by reflexivity.
+      rewrite Z.land_ones; [|word].
       word.
     }
+    rewrite decide_True; [|word].
 
-    set next_nibble := (w64_word_instance.(word.and) (w64_word_instance.(word.sru) (hash_key key) (w64_word_instance.(word.sub) shift (W64 4))) (W64 15)).
-
-    have Hnib_u : 0 ≤ uint.Z next_nibble < 16.
-    {
-      unfold next_nibble.
-      rewrite word.unsigned_and_nowrap.
-      change (uint.Z (W64 15)) with 15.
-      split.
-      - apply Z.land_nonneg.
-        right.
-        word.
-      - change 15 with (Z.ones 4).
-        rewrite Z.land_ones.
-        + apply Z_mod_lt.
-          word.
-        + word.
-    }
-
-    have Hlt_nat : (sint.nat next_nibble < length children_vals)%nat by
-                     (rewrite Hchildren_len; word).
-    destruct (lookup_lt_is_Some_2 children_vals (sint.nat next_nibble) Hlt_nat)
+    destruct (lookup_lt_is_Some_2 children_vals (Z.to_nat next_nibble))
       as [v Hv].
+    { word. }
 
     wp_auto.
 
-    have Hdom : h ∈ path_to_domain path by apply (in_domain _ (hash_key key)).
+    have Hdom : h ∈ path_to_domain path by rewrite -in_domain.
 
     wp_apply wp_Value__Load.
     iInv "His_map" as "[Hroot >Hmap]" "Hclose_ht".
@@ -932,8 +890,7 @@ Section proof.
 
     unfold own_ht_map.
     iApply fupd_mask_intro.
-    { apply empty_subseteq.
-    (* set_solver. doesnt work, only when Hdom is defined? *) }
+    { apply empty_subseteq. }
     iIntros "Hmask".
     iNext.
 
@@ -942,51 +899,29 @@ Section proof.
     iNamed.
     iNamed "Hmap".
 
-    (* iNamed "Hhtinv". *)
-    (* iNamed "Hinv". *)
-
     iDestruct (big_sepL_lookup_acc with "Hchildren") as "[Hchild Hchildren_close]"; [exact Hv|].
+    replace (Z.of_nat (Z.to_nat next_nibble)) with next_nibble by word.
     iNamed "Hchild".
-    iExists (interface.mk_ok (go.PointerType hashtriemap.node) (# nodeptr)).
-    (* replace (sint.nat next_nibble) with (Z.to_nat (sint.Z next_nibble)) in Hv by word. *)
-    replace (Z.of_nat (Z.to_nat (sint.Z next_nibble))) with (sint.Z next_nibble) by word.
     iFrame "Hown_child".
     iIntros "Hown_child".
 
     unfold ht_load_ret.
     iEval (unfold childP) in "Hchild".
 
-    set next := Z.of_nat (sint.nat next_nibble).
-    set next_path := (path ++ [next]).
+    set next_path := (path ++ [next_nibble]).
 
     have Hlen : length next_path = (length path + 1)%nat by
                                      rewrite app_length /=.
 
-    have Hz : uint.Z next_nibble = Z.land (h ≫ (sh path - 4)) 15.
-    {
-      rewrite (next_nibble_eq _ path _ Hshift).
-      - reflexivity.
-      - auto.
-    }
     have Hh : h = uint.Z (hash_key key) by reflexivity.
     have Hdom_child : h ∈ path_to_domain next_path.
     {
       have H : belongs_to_path next_path h.
       {
         rewrite /belongs_to_path.
-
-        - apply (next_nibble_extend path h next); try done.
-          + unfold h.
-            pose proof (word.unsigned_range (hash_key key)) as [H0 _].
-            exact H0.
-          + unfold next.
-            rewrite Z2Nat.id; [|word].
-            rewrite <- Z2Nat.id with (n:=sint.Z next_nibble) by word.
-            word.
+        apply (next_nibble_extend path h next_nibble); try done; word.
       }
-      apply (in_domain next_path (hash_key key) h).
-      { word. }
-      exact H.
+      rewrite -in_domain; done.
     }
 
     destruct (decide (nodeptr = null)).
@@ -1004,7 +939,6 @@ Section proof.
       iDestruct (map_state_agree with "Hmap Hown") as %Heq.
       subst m.
 
-      replace (sint.Z next_nibble) with next by (unfold next; word).
       iDestruct (user_map_lookup Hdom_child Hh with "Hmap Hchild") as %Hum.
       (* iDestruct (user_map_lookup Hdom Hh with "Hmap Hchild") as %Hum. *)
 
@@ -1015,10 +949,12 @@ Section proof.
       (* iDestruct ("Hptsto_close" with "Hptsto") as "Hchild". *)
 
       iDestruct ("Hchildren_close" with "[Hown_child Hchild]") as "Hchildren".
-      { iExists nodeptr. iFrame. unfold childP.
-        destruct (decide (nodeptr = null)).
-        - iFrame.
-        - contradiction n0.
+      {
+        iExists nodeptr.
+        iFrame.
+        unfold childP.
+        rewrite decide_True; [|done].
+        iFrame.
       }
 
       iMod ("Hclose_au" with "Hown") as "HΦ".
@@ -1030,12 +966,9 @@ Section proof.
       { set_solver. }
       iIntros "_".
 
-      wp_auto.
-      rewrite decide_True; [|reflexivity].
-      wp_auto.
+      wp_auto; rewrite decide_True; [|reflexivity]; wp_auto.
 
-      replace (bool_decide (nodeptr = null)) with true.
-      2: { symmetry. rewrite (bool_decide_eq_true (nodeptr = null)). exact e. }
+      rewrite bool_decide_true; [|exact e].
 
       wp_auto.
       wp_alloc d_ptr as "d_ptr".
@@ -1052,7 +985,6 @@ Section proof.
 
     iNamed "Hchild".
 
-    (* iDestruct "Hchild" as (is_entry) "(#Hnodeis_entry & Hchild)". *)
     destruct is_entry.
     {
       iEval (unfold entry_node) in "Hchild".
@@ -1077,28 +1009,23 @@ Section proof.
         iExists ent.
         iExists map.
         iExists hash.
-        rewrite /named.
-        unfold singleton_map_fn.
         iFrame "Hown_path".
         iFrame "#".
         done.
       }
 
       iMod "Hclose_au_mask" as "_".
-      iMod ("Hclose_ind" with "[$Hchildren]") as "_".
+      iMod ("Hclose_ind" with "Hchildren") as "_".
       iMod ("Hclose_ht" with "[$Hroot $Hmap]") as "_".
 
-      iApply fupd_mask_intro.
-      { set_solver. }
-      iIntros "_".
+      iModIntro.
 
       wp_auto.
       rewrite decide_True; [|reflexivity].
 
       wp_auto.
 
-      replace (bool_decide (nodeptr = null)) with false.
-      2: { symmetry. rewrite (bool_decide_eq_false (nodeptr = null)). exact n0. }
+      rewrite bool_decide_false; [|done].
 
       wp_auto.
 
@@ -1110,12 +1037,8 @@ Section proof.
       2: {
         iPureIntro.
         subst h.
-        apply (in_domain _ (hash_key key)); auto.
-        replace (path ++ [sint.Z next_nibble]) with next_path.
-        - apply Hdom_child.
-        - unfold next_path, next.
-          replace (Z.of_nat (Z.to_nat (sint.Z next_nibble))) with (sint.Z next_nibble) by word.
-          reflexivity.
+        rewrite in_domain; [|auto].
+        exact Hdom_child.
       }
 
       iAuIntro.
@@ -1132,8 +1055,7 @@ Section proof.
       iSplit.
       - iIntros.
         iFrame.
-      -
-        unfold ht_load_ret.
+      - unfold ht_load_ret.
         iIntros (m) "HΦ".
         wp_auto.
         destruct (m !! key) eqn:Hlookup_key.
@@ -1167,25 +1089,17 @@ Section proof.
     wp_auto.
     wp_apply (wp_node__indirect with "[$]").
     wp_for_post.
+    replace (w64_word_instance.(word.sub)
+                                 (W64 (sh path)) (W64 4)) with (W64 (sh path - 4)) by word.
     iFrame.
     iFrame "#".
     iPureIntro.
 
-    split_and!; auto.
+    split_and!; auto; try done.
     - rewrite sh_snoc.
-      unfold sh.
-      replace (w64_word_instance.(word.sub) shift (W64 4)) with (W64 (uint.Z shift - 4)) by word.
-      rewrite Hshift.
-      unfold sh.
-      word.
-    - apply (in_domain _ _ _ Hh) in Hdom_child.
-      auto.
-      replace (Z.of_nat (Z.to_nat (sint.Z next_nibble))) with (sint.Z next_nibble) by word.
-      replace (path ++ [sint.Z next_nibble]) with next_path.
-      + apply Hdom_child.
-      + unfold next_path, next.
-        replace (Z.of_nat (Z.to_nat (sint.Z next_nibble))) with (sint.Z next_nibble) by word.
-        reflexivity.
+      reflexivity.
+    - rewrite in_domain; [exact Hdom_child|].
+      apply Hh.
   Qed.
 
 End proof.

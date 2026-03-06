@@ -7,7 +7,7 @@ From stdpp Require Import ssreflect.
 (* From Stdlib Require Import ZArith List. *)
 
 Open Scope Z_scope.
-Coercion Z.of_nat : nat >-> Z.
+Local Coercion Z.of_nat : nat >-> Z.
 
 Section model.
 
@@ -65,7 +65,7 @@ Section model.
     apply elem_of_seqZ; word.
   Qed.
 
-  Lemma in_domain p (k: w64) h :
+  Lemma in_domain {p h} (k: w64) :
     h = uint.Z k →
     belongs_to_path p h ↔ h ∈ path_to_domain p.
   Proof.

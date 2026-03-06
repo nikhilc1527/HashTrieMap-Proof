@@ -200,12 +200,11 @@ Section model.
     (γ: ghost_names) (q: Qp) (children_slice: slice.t)
     (children_vals: list atomic.Value.t)
     (ind: loc) (path: path) : iProp Σ :=
-    "Hchildren" :: [∗ list] i_ ↦ val ∈ children_vals,
-      let i := Z.of_nat i_ in
+    "Hchildren" :: [∗ list] i ↦ val ∈ children_vals,
       ∃ (nodeptr: loc),
         "Hown_child" :: (slice.slice_index_ref atomic.Value.t i children_slice) ↦ᵥ{q}
           (interface.ok (interface.mk (go.PointerType hashtriemap.node) #nodeptr)) ∗
-        "Hchild" :: childP child_indirect γ q nodeptr path (path ++ [i]).
+        "Hchild" :: childP child_indirect γ q nodeptr path (path ++ [Z.of_nat i]).
 
   (* split 50/50 between an invariant and the mutex to allow for lock-free reads *)
   (* we always have read permission on any indirect, but only can write if we acquire the lock *)
