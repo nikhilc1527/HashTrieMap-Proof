@@ -854,15 +854,19 @@ Section proof.
     iEval (rewrite indirect_unfold /indirect_F) in "Hi_indirect".
     iNamed "Hi_indirect".
 
-    wp_if_destruct.
-    {
-      unfold sh in e.
-      exfalso.
+    rewrite bool_decide_false.
+    2: {
+      replace shift with (sh path).
+      unfold sh.
       word.
     }
+    rewrite decide_True; [|auto].
+    wp_auto.
 
     iDestruct (own_slice_len with "Hchildren_slice") as %Hlen_children.
 
+    subst hash.
+    rewrite Hshift.
     rewrite next_nibble_eq; [|exact Hpath_len].
     set next_nibble := (Z.land (uint.Z (hash_key key) ≫ (sh path - 4)) 15).
     replace (sint.Z children_slice.(slice.len)) with 16 by word.
@@ -919,7 +923,9 @@ Section proof.
       have H : belongs_to_path next_path h.
       {
         rewrite /belongs_to_path.
-        apply (next_nibble_extend path h next_nibble); try done; word.
+        apply (next_nibble_extend path h next_nibble).
+        { word. }
+        all: done.
       }
       rewrite -in_domain; done.
     }
@@ -940,13 +946,6 @@ Section proof.
       subst m.
 
       iDestruct (user_map_lookup Hdom_child Hh with "Hmap Hchild") as %Hum.
-      (* iDestruct (user_map_lookup Hdom Hh with "Hmap Hchild") as %Hum. *)
-
-      (* iDestruct (own_path_lookup _ _ _ h with "Hchild") as "[Hptsto Hptsto_close]"; [exact Hdom|]. *)
-      (* (* iDestruct (big_sepL_elem_of_acc with "Hchild") as "[Hptsto Hptsto_close]". *) *)
-      (* (* { exact Hdom. } *) *)
-      (* iDestruct (map_valid with "Hauth_map Hptsto") as %Hlookup. *)
-      (* iDestruct ("Hptsto_close" with "Hptsto") as "Hchild". *)
 
       iDestruct ("Hchildren_close" with "[Hown_child Hchild]") as "Hchildren".
       {
@@ -962,9 +961,7 @@ Section proof.
       iMod ("Hclose_ind" with "Hchildren") as "_".
       iMod ("Hclose_ht" with "[$Hroot $Hmap]") as "_".
 
-      iApply fupd_mask_intro.
-      { set_solver. }
-      iIntros "_".
+      iModIntro.
 
       wp_auto; rewrite decide_True; [|reflexivity]; wp_auto.
 
@@ -1001,7 +998,7 @@ Section proof.
       iDestruct ("Hchildren_close" with "[Hown_child Hown_path]") as "Hchildren".
       {
         iExists nodeptr. iFrame. unfold childP.
-        rewrite decide_False; [|exact n0].
+        rewrite (decide_False _ _ n).
         iExists true.
         rewrite /named.
         iSplit; eauto.
@@ -1020,10 +1017,7 @@ Section proof.
 
       iModIntro.
 
-      wp_auto.
-      rewrite decide_True; [|reflexivity].
-
-      wp_auto.
+      wp_auto; rewrite decide_True; [|reflexivity]; wp_auto.
 
       rewrite bool_decide_false; [|done].
 
@@ -1058,6 +1052,7 @@ Section proof.
       - unfold ht_load_ret.
         iIntros (m) "HΦ".
         wp_auto.
+
         destruct (m !! key) eqn:Hlookup_key.
         all: rewrite Hlookup_key.
         all: wp_auto.
@@ -1069,7 +1064,7 @@ Section proof.
 
     iDestruct ("Hchildren_close" with "[Hown_child]") as "Hchildren".
     { iExists nodeptr. iFrame. unfold childP.
-      rewrite decide_False; [|exact n0].
+      rewrite (decide_False _ _ n).
       iExists false. iFrame "#".
       iPureIntro. split; done.
     }
@@ -1080,11 +1075,9 @@ Section proof.
 
     iModIntro.
 
-    wp_auto.
-    rewrite decide_True; [|reflexivity].
-    wp_auto.
+    wp_auto; rewrite decide_True; [|reflexivity]; wp_auto.
 
-    rewrite bool_decide_false; [|exact n0].
+    rewrite bool_decide_false; [|exact n].
 
     wp_auto.
     wp_apply (wp_node__indirect with "[$]").

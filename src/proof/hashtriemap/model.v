@@ -677,7 +677,7 @@ Section model.
     iNamed "Hmap".
     unfold own_ht_map.
 
-    have Hdom : h ∈ path_to_domain path by apply (in_domain path (hash_key key)).
+    have Hdom : h ∈ path_to_domain path by rewrite -in_domain.
     iDestruct (own_path_lookup h _ _ _ _ Hdom with "Hpath") as "[Hptsto Hptsto_close]".
     iDestruct (map_valid with "Hauth_map Hptsto") as %Hlookup.
     iDestruct ("Hptsto_close" with "Hptsto") as "Hpath".
