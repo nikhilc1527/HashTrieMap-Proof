@@ -1,4 +1,4 @@
-From iris.bi.lib Require Import fractional.
+From iris.bi.lib Require Import fractional atomic.
 
 From New.code.hashtriemap Require Import hashtriemap.
 From New.generatedproof.hashtriemap Require Import hashtriemap.
@@ -11,6 +11,7 @@ From Perennial.Helpers Require Import NamedProps.
 Import named_props_ascii_notation.
 From New.ghost Require Import ghost_var.
 From New.ghost Require Import mono_list.
+From New.ghost Require Import saved_prop token.
 
 From New.proof.hashtriemap Require Import aux.
 From New.proof.hashtriemap Require Export paths.
@@ -26,6 +27,7 @@ Section model.
   Definition init_statusN : namespace := nroot .@ "init_status".
   Definition indN         : namespace := nroot .@ "indirect".
   Definition entryN       : namespace := nroot .@ "entry".
+  Definition lookupHelpN  : namespace := nroot .@ "lookup_help".
 
   (* Ghost state for the hashtriemap. *)
   Record ghost_names := mkNames {
@@ -53,11 +55,13 @@ Section model.
 
   Inductive lookup_status :=
   | LookupPending
-  | LookupDone (res : option V).
+  | LookupDoneFalse.
 
   Record lookup_info := mkLookupInfo {
     lookup_key : K;
     lookup_version : nat;
+    lookup_pending_name : gname;
+    lookup_help_name : gname;
   }.
 
   Parameter hash_key : K → w64.
@@ -294,14 +298,72 @@ Section model.
   Definition lookup_map (γ : ghost_names) (lookups : gmap nat lookup_info) : iProp Σ :=
     map_ctx γ.(lookup_name) 1 lookups.
 
-  Definition lookup_token (γ : ghost_names) (id ver : nat) (key : K) : iProp Σ :=
-    ptsto_ro γ.(lookup_name) id (mkLookupInfo key ver).
+  Definition ht_load_ret (m: gmap K V) (key: K) : val :=
+    (match m !! key with
+    | Some v => (#v, #true)
+    | None => (#(zero_val V), #false)
+    end)%V.
+
+  Definition ht_au_mask : coPset :=
+    ⊤ ∖ ↑mapN ∖ ↑indN ∖ ↑entryN.
+
+  Definition lookup_pending_au (γ : ghost_names) (key : K) (Φ : val → iProp Σ) : iProp Σ :=
+    AU <{ ∃∃ m : gmap K V, own_ht_map γ m }>
+      @ ht_au_mask, ∅
+      <{ own_ht_map γ m, COMM Φ (ht_load_ret m key) }>.
+
+  Definition lookup_token
+    (γ : ghost_names) (id ver : nat) (key : K)
+    (Φ : val → iProp Σ) : iProp Σ :=
+    ∃ γpend γhelp (mver : gmap K V),
+      ptsto_ro γ.(lookup_name) id (mkLookupInfo key ver γpend γhelp) ∗
+      mono_list_idx_own γ.(hist_name) ver mver ∗
+      saved_prop_own γpend DfracDiscarded (lookup_pending_au γ key Φ) ∗
+      (token γhelp ={↑(lookupHelpN .@ id)}=∗ ▷ Φ (#(zero_val V), #false)%V) ∗
+      (▷ Φ (#(zero_val V), #false)%V ={↑(lookupHelpN .@ id)}=∗ token γhelp).
 
   Definition lookup_status_map (γ : ghost_names) (statuses : gmap nat lookup_status) : iProp Σ :=
     map_ctx γ.(lookup_status_name) 1 statuses.
 
   Definition lookup_status_frags (γ : ghost_names) (statuses : gmap nat lookup_status) : iProp Σ :=
     [∗ map] id ↦ st ∈ statuses, ptsto_mut γ.(lookup_status_name) id 1 st.
+
+  Definition lookup_done_ret : val :=
+    (#(zero_val V), #false)%V.
+
+  Lemma alloc_lookup_help_token {E} (id : nat) (P : iProp Σ) :
+    ⊢ |={E}=> ∃ γh, (token γh ={↑(lookupHelpN .@ id)}=∗ ▷ P) ∗
+                  (▷ P ={↑(lookupHelpN .@ id)}=∗ token γh).
+  Proof.
+    iMod (token_alloc) as "[%γh Htok]".
+    iMod (token_alloc) as "[%γh2 Htok2]".
+    iMod (inv_alloc (lookupHelpN .@ id) _ (P ∗ token γh2 ∨ token γh)%I with "[$Htok]") as "#Hescrow".
+    iExists γh. iModIntro.
+    iSplitR.
+    - iIntros "Ht". iInv "Hescrow" as "[[HP _]| >Hbad]"; first by iFrame.
+      iCombine "Ht Hbad" gives %[].
+    - iIntros "HP". iInv "Hescrow" as "[[_ >Hbad] | >Htok]".
+      + iCombine "Htok2 Hbad" gives %[].
+      + iModIntro. iSplitR "Htok"; last by iFrame. iNext. iLeft. iFrame.
+  Qed.
+
+  Definition lookup_status_interp
+    (γ : ghost_names) (info : lookup_info) (Φ : val → iProp Σ) (st : lookup_status) : iProp Σ :=
+    "#Hlookup_pending_saved" ∷
+      saved_prop_own info.(lookup_pending_name) DfracDiscarded
+        (lookup_pending_au γ info.(lookup_key) Φ) ∗
+    match st with
+    | LookupPending =>
+        lookup_pending_au γ info.(lookup_key) Φ
+    | LookupDoneFalse => token info.(lookup_help_name)
+    end.
+
+  Definition lookup_interp_map
+    (γ : ghost_names) (lookups : gmap nat lookup_info) (statuses : gmap nat lookup_status) : iProp Σ :=
+    [∗ map] id ↦ st ∈ statuses,
+      ∃ info Φ,
+        "%Hlookup_info" :: ⌜lookups !! id = Some info⌝ ∗
+        "Hlookup_interp" ∷ lookup_status_interp γ info Φ st.
 
   Definition map_history (γ: ghost_names) (m: gmap K V) : iProp Σ :=
     ∃ (hist : list (gmap K V))
@@ -312,13 +374,14 @@ Section model.
       "Hlookups" ∷ lookup_map γ lookups ∗
       "Hlookup_status" ∷ lookup_status_map γ statuses ∗
       "Hlookup_status_frags" ∷ lookup_status_frags γ statuses ∗
+      "Hlookup_interp" ∷ lookup_interp_map γ lookups statuses ∗
       "%Hlookup_dom" :: ⌜dom lookups = dom statuses⌝ ∗
       "%Hlookup_versions" :: ⌜∀ id linfo, lookups !! id = Some linfo → lookup_version linfo < length hist⌝ ∗
       "%Hlookup_old_done" :: ⌜∀ id linfo st,
         lookups !! id = Some linfo →
         statuses !! id = Some st →
         lookup_version linfo < map_current_version hist →
-        ∃ res, st = LookupDone res⌝.
+        st = LookupDoneFalse⌝.
 
   (* abstract the state of the entire map, can be fully abstracted away from hashtriemap.v *)
   Definition map_state (γ: ghost_names) (user_map: gmap K V) (hm: hash_map) : iProp Σ :=
@@ -335,8 +398,6 @@ Section model.
                          hm !! h = Some sub →
                          sub !! k = Some v →
                          uint.Z (hash_key k) = h⌝).
-
-  #[global] Instance map_state_timeless γ user_map hm : Timeless (map_state γ user_map hm) := _.
 
   (* this is usually only really needed once per function, so it's convenient if its bundled away *)
   Definition own_root
@@ -357,16 +418,6 @@ Section model.
     (γ: ghost_names) (ht: loc) : iProp Σ :=
     ("#Hseed" :: ∃ (seed: w64), ht.[hashtriemap.HashTrieMap.t, "seed"] ↦□ seed) ∗
     "#His_map" :: ht_inv γ ht.
-
-  Definition ht_au_mask : coPset :=
-    ⊤ ∖ ↑mapN ∖ ↑indN ∖ ↑entryN.
-
-  (* Helper for Load return values. *)
-  Definition ht_load_ret (m: gmap K V) (key: K) : val :=
-    (match m !! key with
-    | Some v => (#v, #true)
-    | None => (#(zero_val V), #false)
-    end)%V.
 
   (* designed to be split between an invariant and a mutex, so that reading can be done outside of the critical section and writing can only be done inside *)
   Definition init_tok `{!ghost_varG Σ bool} (γ: ghost_names) (b: bool) : iProp Σ :=
@@ -732,17 +783,17 @@ Section model.
       lookups !! id = Some linfo →
       statuses !! id = Some st →
       lookup_version linfo < map_current_version hist →
-      ∃ res, st = LookupDone res) →
+      st = LookupDoneFalse) →
     (∀ id linfo st,
       lookups !! id = Some linfo →
       statuses !! id = Some st →
       lookup_version linfo = map_current_version hist →
-      ∃ res, st = LookupDone res) →
+      st = LookupDoneFalse) →
     ∀ id linfo st,
       lookups !! id = Some linfo →
       statuses !! id = Some st →
       lookup_version linfo < map_current_version (hist ++ [mnew]) →
-      ∃ res, st = LookupDone res.
+      st = LookupDoneFalse.
   Proof.
     intros Hcur Hvers Hold Hhelp id linfo st Hlookup Hstatus Hlt.
     destruct hist as [|m0 hist']; first done.
@@ -768,11 +819,11 @@ Section model.
       hist !! map_current_version hist = Some user_map →
       dom lookups = dom statuses' →
       (∀ id linfo, lookups !! id = Some linfo → lookup_version linfo < length hist) →
-      (∀ id linfo st',
-        lookups !! id = Some linfo →
-        statuses' !! id = Some st' →
-        lookup_version linfo = map_current_version hist →
-        ∃ res, st' = LookupDone res)) :
+	    (∀ id linfo st',
+	      lookups !! id = Some linfo →
+	      statuses' !! id = Some st' →
+	      lookup_version linfo = map_current_version hist →
+	      st' = LookupDoneFalse)) :
     let f' := (λ h', if decide (h' = h) then <[key:=value]>(f h) else f h') in
     let um' := <[key:=value]> user_map in
     let hm' := <[h := (<[key:=value]>) (f h)]> hm in
@@ -788,7 +839,7 @@ Section model.
     iIntros "(Hmap & Huser_map2 & Hpath)".
     iDestruct "Hmap" as "(Hauth_map & Huser_map & %Hflat & Hhistory & %Hbuckets & %Hbuckets_rev)".
     iDestruct "Hhistory" as (hist lookups statuses)
-      "(Hhistory_auth & %Hhistory_cur & Hlookups & Hlookup_status & Hlookup_status_frags & %Hlookup_dom & %Hlookup_versions & %Hlookup_old_done)".
+      "(Hhistory_auth & %Hhistory_cur & Hlookups & Hlookup_status & Hlookup_status_frags & Hlookup_interp & %Hlookup_dom & %Hlookup_versions & %Hlookup_old_done)".
     unfold own_ht_map.
 
     have Hdom : h ∈ path_to_domain path by rewrite -in_domain.
@@ -833,13 +884,13 @@ Section model.
     unfold f'.
     iSplitR "Hpath"; [|iFrame "Hpath"].
     iSplit; first done.
-    unfold map_history, lookup_status_frags.
+    unfold map_history, lookup_status_frags, lookup_interp_map.
     iSplit.
     {
       iExists (hist ++ [um']), lookups, statuses.
-      iFrame "Hhistory_auth Hlookups Hlookup_status Hlookup_status_frags".
+      iFrame "Hhistory_auth Hlookups Hlookup_status Hlookup_status_frags Hlookup_interp".
       iPureIntro.
-      repeat split.
+      split_and!.
       - rewrite /map_current_version app_length /=.
         rewrite Nat.add_comm Nat.add_1_l -pred_Sn.
         rewrite lookup_app_r; [|lia].
@@ -893,18 +944,24 @@ Section model.
         eapply Hbuckets_rev; eauto.
   Qed.
 
-  Lemma map_state_register_lookup {γ m hm} (key : K) :
-    map_state γ m hm ==∗
+  Lemma map_state_register_lookup {γ m hm} (key : K) (Φ : val → iProp Σ) :
+    map_state γ m hm -∗
+    lookup_pending_au γ key Φ ={⊤}=∗
     ∃ id ver,
       map_state γ m hm ∗
-      lookup_token γ id ver key.
+      lookup_token γ id ver key Φ.
   Proof.
-    iIntros "Hmap".
+    iIntros "Hmap HP".
     iNamed "Hmap".
     iNamed "Hhistory".
     set (ver := map_current_version hist).
     set (id := fresh (dom lookups)).
-    set (linfo := mkLookupInfo key ver).
+    iMod (saved_prop_alloc (lookup_pending_au γ key Φ) DfracDiscarded) as (γpend) "#Hlookup_pending_saved".
+    { done. }
+    iMod (token_alloc) as (γhelp) "Hhelp_tok_init".
+    iMod (token_alloc) as (γhelp2) "Hhelp_done".
+    iMod (inv_alloc (lookupHelpN .@ id) _ (Φ (#(zero_val V), #false)%V ∗ token γhelp2 ∨ token γhelp)%I with "[$Hhelp_tok_init]") as "#Hhelp_escrow".
+    set (linfo := mkLookupInfo key ver γpend γhelp).
     have Hlookup_none : lookups !! id = None.
     {
       apply not_elem_of_dom.
@@ -917,83 +974,92 @@ Section model.
       rewrite -Hlookup_dom /id.
       apply is_fresh.
     }
-    iMod (map_alloc_ro id linfo with "Hlookups") as "[Hlookups #Hlookup_tok]"; first exact Hlookup_none.
+    iDestruct (mono_list_lb_own_get with "Hhistory_auth") as "#Hhist_lb".
+    iDestruct (mono_list_idx_own_get with "Hhist_lb") as "#Hhist_idx"; first exact Hhistory_cur.
+    iMod (map_alloc_ro id linfo with "Hlookups") as "[Hlookups #Hlookup_tok0]"; first exact Hlookup_none.
     iMod (map_alloc id LookupPending with "Hlookup_status") as "[Hlookup_status Hlookup_pending]"; first exact Hstatus_none.
     iModIntro.
     iExists id, ver.
-    iFrame "Hlookup_tok".
-    unfold map_state.
-    iFrame "Hauth_map Huser_map".
-    iSplit; first done.
-    iSplit; last done.
-    unfold map_history, lookup_status_frags.
-    iExists hist, (<[id := linfo]> lookups), (<[id := LookupPending]> statuses).
-    iFrame "Hhistory_auth Hlookups Hlookup_status".
-    rewrite big_sepM_insert; last exact Hstatus_none.
-    iFrame "Hlookup_pending Hlookup_status_frags".
-    iSplit; first done.
-    iPureIntro.
-    split_and!.
-    - rewrite !dom_insert_L Hlookup_dom.
-      reflexivity.
-    - intros id' info' Hlookup_info.
-      destruct (decide (id' = id)) as [->|Hneq].
-      + rewrite lookup_insert in Hlookup_info.
-        rewrite decide_True in Hlookup_info; [|reflexivity].
-        inversion Hlookup_info; subst; clear Hlookup_info.
-        rewrite /ver /map_current_version.
-        destruct hist as [|m0 hist']; first done.
-        simpl.
-        change (length hist' < S (length hist')).
-        lia.
-      + rewrite lookup_insert_ne in Hlookup_info; [|done].
-        eapply Hlookup_versions; eauto.
-    - intros id' info' st' Hlookup_info Hstatus_info Hold.
-      destruct (decide (id' = id)) as [->|Hneq].
-      + rewrite lookup_insert in Hlookup_info.
-        rewrite decide_True in Hlookup_info; [|reflexivity].
-        inversion Hlookup_info; subst; clear Hlookup_info.
-        rewrite lookup_insert in Hstatus_info.
-        rewrite decide_True in Hstatus_info; [|reflexivity].
-        inversion Hstatus_info; subst; clear Hstatus_info.
-        rewrite /ver /map_current_version in Hold.
-        destruct hist as [|m0 hist']; first done.
-        have Hver_cur : ver = length hist'.
-        { rewrite /ver /map_current_version. simpl. reflexivity. }
-        assert (length hist' < length hist') as Hcontra.
-        { rewrite <- Hver_cur. exact Hold. }
-        lia.
-      + rewrite lookup_insert_ne in Hlookup_info; [|done].
-        rewrite lookup_insert_ne in Hstatus_info; [|done].
-        eapply Hlookup_old_done; eauto.
-  Qed.
-
-  Lemma map_history_lookup_status_acc {γ m id ver key} :
-    map_history γ m -∗
-    lookup_token γ id ver key -∗
-    ∃ st,
-      ptsto_mut γ.(lookup_status_name) id 1 st ∗
-      (ptsto_mut γ.(lookup_status_name) id 1 st -∗ map_history γ m).
-  Proof.
-    iIntros "Hhistory Htok".
-    iNamed "Hhistory".
-    iDestruct (map_ro_valid with "Hlookups Htok") as %Hlookup_info.
-    pose proof Hlookup_info as Hlookup_info_dom.
-    apply elem_of_dom_2 in Hlookup_info_dom.
-    rewrite Hlookup_dom in Hlookup_info_dom.
-    apply elem_of_dom in Hlookup_info_dom as [st Hstatus_lookup].
-    iDestruct (big_sepM_delete _ _ id with "Hlookup_status_frags") as "[Hstatus_frag Hlookup_status_frags]"; first exact Hstatus_lookup.
-    iExists st.
-    iFrame "Hstatus_frag".
-    iIntros "Hstatus_frag".
-    unfold map_history, lookup_status_frags.
-    iFrame "Hhistory_auth Hlookups Hlookup_status".
-    iSplit; first done.
-    iSplit.
-    - iApply (big_sepM_delete _ _ id); first exact Hstatus_lookup.
+    iSplitR "Hlookup_pending_saved Hlookup_tok0 Hhelp_escrow Hhelp_done".
+    - unfold map_state.
+      iFrame "Hauth_map Huser_map".
+      iSplit; first done.
+      iSplit; last done.
+      unfold map_history, lookup_status_frags, lookup_interp_map.
+      rewrite /named.
+      iExists hist, (<[id := linfo]> lookups), (<[id := LookupPending]> statuses).
       iFrame.
-    - iPureIntro.
-      done.
+      (* iFrame "Hhistory_auth Hlookups Hlookup_status". *)
+      iSplit; first done.
+      rewrite big_sepM_insert; last exact Hstatus_none.
+      iFrame.
+      (* iFrame "Hlookup_pending Hlookup_status_frags". *)
+      iSplit.
+      + rewrite big_sepM_insert; last exact Hstatus_none.
+        iSplitL "Hlookup_pending_saved HP".
+        {
+          iExists linfo, Φ.
+          iSplit.
+          { iPureIntro. rewrite lookup_insert. rewrite decide_True; reflexivity. }
+          unfold lookup_status_interp.
+          simpl.
+          iFrame "# HP".
+        }
+        iApply (big_sepM_mono with "Hlookup_interp").
+        iIntros (id' st' Hstatus_lookup) "Hinterp".
+        iDestruct "Hinterp" as (info' P') "[%Hlookup_info' Hinterp]".
+        iExists info', P'.
+        iSplitR "Hinterp".
+        { iPureIntro.
+          rewrite lookup_insert_ne; last first.
+          { intros ->.
+            rewrite Hstatus_lookup in Hstatus_none.
+            discriminate.
+          }
+          exact Hlookup_info'. }
+        iFrame "Hinterp".
+      + iPureIntro.
+        split_and!.
+        * rewrite !dom_insert_L Hlookup_dom.
+          reflexivity.
+        * intros id' info' Hlookup_info.
+          destruct (decide (id' = id)) as [->|Hneq].
+          -- rewrite lookup_insert in Hlookup_info.
+             rewrite decide_True in Hlookup_info; [|reflexivity].
+             inversion Hlookup_info; subst; clear Hlookup_info.
+             rewrite /ver /map_current_version.
+             destruct hist as [|m0 hist']; first done.
+             simpl.
+             change (length hist' < S (length hist')).
+             lia.
+          -- rewrite lookup_insert_ne in Hlookup_info; [|done].
+             eapply Hlookup_versions; eauto.
+        * intros id' info' st' Hlookup_info Hstatus_info Hold.
+          destruct (decide (id' = id)) as [->|Hneq].
+          -- rewrite lookup_insert in Hlookup_info.
+             rewrite decide_True in Hlookup_info; [|reflexivity].
+             inversion Hlookup_info; subst; clear Hlookup_info.
+             rewrite lookup_insert in Hstatus_info.
+             rewrite decide_True in Hstatus_info; [|reflexivity].
+             inversion Hstatus_info; subst; clear Hstatus_info.
+             rewrite /ver /map_current_version in Hold.
+             destruct hist as [|m0 hist']; first done.
+             have Hver_cur : ver = length hist'.
+             { rewrite /ver /map_current_version. simpl. reflexivity. }
+             assert (length hist' < length hist') as Hcontra.
+             { rewrite <- Hver_cur. exact Hold. }
+             lia.
+          -- rewrite lookup_insert_ne in Hlookup_info; [|done].
+             rewrite lookup_insert_ne in Hstatus_info; [|done].
+             eapply Hlookup_old_done; eauto.
+    - iExists γpend, γhelp, m.
+      iFrame "#".
+	      iSplitR "Hhelp_done".
+	      + iIntros "Ht". iInv "Hhelp_escrow" as "[[HP _]| >Hbad]"; first by iFrame.
+	        iCombine "Ht Hbad" gives %[].
+	      + iIntros "HPdone". iInv "Hhelp_escrow" as "[[_ >Hbad] | >Htok]".
+        * iCombine "Hhelp_done Hbad" gives %[].
+        * iModIntro. iSplitR "Htok"; last by iFrame. iNext. iLeft. iFrame.
   Qed.
 
   Lemma map_history_snapshot {γ m} :
@@ -1010,28 +1076,6 @@ Section model.
     iFrame.
     rewrite /named.
     iFrame "Hhist_lb".
-    done.
-  Qed.
-
-  Lemma map_history_lookup_version_snapshot {γ m id ver key} :
-    map_history γ m -∗
-    lookup_token γ id ver key -∗
-    ∃ (mver : gmap K V),
-      map_history γ m ∗
-      mono_list_idx_own γ.(hist_name) ver mver.
-  Proof.
-    iIntros "Hhistory Htok".
-    iNamed "Hhistory".
-    iDestruct (map_ro_valid with "Hlookups Htok") as %Hlookup_info.
-    pose proof (Hlookup_versions _ _ Hlookup_info) as Hver_lt_pure.
-    simpl in Hver_lt_pure.
-    have Hver_lt : (ver < length hist)%nat by lia.
-    destruct (lookup_lt_is_Some_2 hist ver Hver_lt) as [mver Hver_lookup].
-    iDestruct (mono_list_lb_own_get with "Hhistory_auth") as "#Hhist_lb".
-    iDestruct (mono_list_idx_own_get ver mver Hver_lookup with "Hhist_lb") as "#Hidx".
-    iExists mver.
-    iFrame.
-    iFrame "Hidx".
     done.
   Qed.
 
@@ -1057,42 +1101,237 @@ Section model.
     congruence.
   Qed.
 
-  Lemma map_history_lookup_status_case {γ m id ver key} :
+  Lemma map_history_lookup_status_acc {γ m id ver key Φ E} :
+    £ 1 -∗
     map_history γ m -∗
-    lookup_token γ id ver key -∗
-    ∃ hist st,
+    lookup_token γ id ver key Φ -∗
+    |={E}=> ∃ info st,
       ptsto_mut γ.(lookup_status_name) id 1 st ∗
-      (ptsto_mut γ.(lookup_status_name) id 1 st -∗ map_history γ m) ∗
-      ⌜hist !! map_current_version hist = Some m⌝ ∗
-      ⌜ver < map_current_version hist → ∃ res, st = LookupDone res⌝.
+      lookup_status_interp γ info Φ st ∗
+      (ptsto_mut γ.(lookup_status_name) id 1 st -∗
+       lookup_status_interp γ info Φ st -∗
+       map_history γ m).
+  Proof.
+    iIntros "Hlc Hhistory Htok".
+    iDestruct "Htok" as (γpend γhelp mver) "(#Hlookup_tok & #Hidx & #Hsaved_tok & Hhelp_tok_to & Hhelp_to_tok)".
+    iNamed "Hhistory".
+    iDestruct (map_ro_valid with "Hlookups Hlookup_tok") as %Hlookup_info.
+    have Hstatus_lookup : is_Some (statuses !! id).
+    { apply elem_of_dom.
+      rewrite -Hlookup_dom.
+      apply elem_of_dom.
+      exists (mkLookupInfo key ver γpend γhelp).
+      exact Hlookup_info. }
+    destruct Hstatus_lookup as [st Hstatus_lookup].
+    iDestruct (big_sepM_delete _ _ id with "Hlookup_status_frags") as "[Hst Hlookup_status_frags]"; first exact Hstatus_lookup.
+    iDestruct (big_sepM_delete _ _ id with "Hlookup_interp") as "[Hinterp Hlookup_interp]"; first exact Hstatus_lookup.
+    iDestruct "Hinterp" as (info Φ') "[%Hlookup_info' Hinterp]".
+	    iDestruct "Hinterp" as "[#Hsaved_inv Hsem]".
+	    have -> : info = mkLookupInfo key ver γpend γhelp.
+	    { rewrite Hlookup_info in Hlookup_info'. inversion Hlookup_info'. reflexivity. }
+	    iPoseProof (saved_prop_agree with "Hsaved_tok Hsaved_inv") as "Heq".
+	    destruct st.
+	    - iMod (lc_fupd_elim_later with "Hlc Heq") as "Hpeq".
+	      iRewrite -"Hpeq" in "Hsem".
+	      iModIntro.
+    iExists (mkLookupInfo key ver γpend γhelp), LookupPending.
+    iFrame "Hst".
+    iSplitL "Hsaved_tok Hsem".
+    { unfold lookup_status_interp. simpl. iFrame "# Hsem". }
+	      iIntros "Hst Hinterp".
+	      unfold map_history, lookup_status_frags, lookup_interp_map.
+	      rewrite /named.
+	      iExists hist, lookups, statuses.
+	      iFrame "Hhistory_auth Hlookups Hlookup_status".
+	      iSplit.
+	      { iPureIntro. exact Hhistory_cur. }
+	      assert (Hstatuses_rebuild : statuses = <[id:=LookupPending]>(delete id statuses)).
+	      { apply map_eq.
+	        intros j.
+	        destruct (decide (j = id)) as [->|Hneq].
+	        - rewrite lookup_insert lookup_delete.
+	          rewrite decide_True; [done|reflexivity].
+	        - rewrite lookup_insert_ne; [|done].
+	          rewrite lookup_delete_ne; [done|done]. }
+	      iSplitL "Hst Hlookup_status_frags".
+	      + rewrite Hstatuses_rebuild /=.
+	        rewrite big_sepM_insert.
+	        2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+	        rewrite -Hstatuses_rebuild.
+	        iFrame.
+	      + iSplitL "Hinterp Hlookup_interp".
+	        * rewrite Hstatuses_rebuild /=.
+	          rewrite big_sepM_insert.
+	          2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+	          iFrame.
+	          iSplit; [done|].
+	          rewrite -Hstatuses_rebuild.
+	          iFrame.
+	        * iPureIntro. repeat split; eauto.
+	    - iModIntro.
+      iExists (mkLookupInfo key ver γpend γhelp), LookupDoneFalse.
+      iFrame "Hst".
+	      iSplitL "Hsaved_tok Hsem".
+	      { unfold lookup_status_interp. simpl. iFrame "# Hsem". }
+	      iIntros "Hst Hinterp".
+	      unfold map_history, lookup_status_frags, lookup_interp_map.
+	      rewrite /named.
+	      iExists hist, lookups, statuses.
+	      iFrame "Hhistory_auth Hlookups Hlookup_status".
+	      iSplit.
+	      { iPureIntro. exact Hhistory_cur. }
+	      assert (Hstatuses_rebuild : statuses = <[id:=LookupDoneFalse]>(delete id statuses)).
+	      { apply map_eq.
+	        intros j.
+	        destruct (decide (j = id)) as [->|Hneq].
+	        - rewrite lookup_insert lookup_delete.
+	          rewrite decide_True; [done|reflexivity].
+	        - rewrite lookup_insert_ne; [|done].
+	          rewrite lookup_delete_ne; [done|done]. }
+	      iSplitL "Hst Hlookup_status_frags".
+	      + rewrite Hstatuses_rebuild /=.
+	        rewrite big_sepM_insert.
+	        2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+	        rewrite -Hstatuses_rebuild.
+	        iFrame.
+	      + iSplitL "Hinterp Hlookup_interp".
+	        * rewrite Hstatuses_rebuild /=.
+	          rewrite big_sepM_insert.
+	          2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+	          iFrame.
+	          iSplit; [done|].
+	          rewrite -Hstatuses_rebuild.
+	          iFrame.
+	        * iPureIntro. repeat split; eauto.
+  Qed.
+
+  Lemma map_history_lookup_version_snapshot {γ m id ver key Φ} :
+    map_history γ m -∗
+    lookup_token γ id ver key Φ -∗
+    ∃ (mver : gmap K V),
+      map_history γ m ∗
+      mono_list_idx_own γ.(hist_name) ver mver.
   Proof.
     iIntros "Hhistory Htok".
+    iDestruct "Htok" as (γpend γhelp mver) "(_ & #Hidx & _)".
+    iExists mver.
+    iFrame "Hhistory Hidx".
+  Qed.
+
+  Lemma map_history_lookup_status_case {γ m id ver key Φ E} :
+    £ 1 -∗
+    map_history γ m -∗
+    lookup_token γ id ver key Φ -∗
+    |={E}=> ∃ hist info st,
+      ptsto_mut γ.(lookup_status_name) id 1 st ∗
+      (match st with
+       | LookupPending => lookup_pending_au γ key Φ
+       | LookupDoneFalse => token info.(lookup_help_name)
+       end) ∗
+      (ptsto_mut γ.(lookup_status_name) id 1 st -∗
+       lookup_status_interp γ info Φ st -∗
+       map_history γ m) ∗
+      ⌜hist !! map_current_version hist = Some m⌝ ∗
+      ⌜ver < map_current_version hist → st = LookupDoneFalse⌝.
+  Proof.
+    iIntros "Hlc Hhistory Htok".
+    iDestruct "Htok" as (γpend γhelp mver) "(#Hlookup_tok & #Hidx & #Hsaved_tok & Hhelp_tok_to & Hhelp_to_tok)".
     iNamed "Hhistory".
-    iDestruct (map_ro_valid with "Hlookups Htok") as %Hlookup_info.
-    pose proof Hlookup_info as Hlookup_info_dom.
-    apply elem_of_dom_2 in Hlookup_info_dom.
-    rewrite Hlookup_dom in Hlookup_info_dom.
-    apply elem_of_dom in Hlookup_info_dom as [st Hstatus_lookup].
-    iDestruct (big_sepM_delete _ _ id with "Hlookup_status_frags") as "[Hst Hlookup_status_frags]";
-      first exact Hstatus_lookup.
-    iDestruct (map_valid with "Hlookup_status Hst") as %Hstatus_info.
-    iExists hist, st.
-    iFrame "Hst".
-    iSplit.
-    - iIntros "Hst".
-      unfold map_history, lookup_status_frags.
-      iExists hist, lookups, statuses.
-      iFrame.
-      iSplit; first done.
-      iSplit.
-      + iApply (big_sepM_delete _ _ id); first exact Hstatus_lookup.
-        iFrame.
-      + iPureIntro.
-        repeat split; done.
-    - iPureIntro.
-      split; first exact Hhistory_cur.
-      intros Hold.
-      eapply Hlookup_old_done; eauto.
+    iDestruct (map_ro_valid with "Hlookups Hlookup_tok") as %Hlookup_info.
+    have Hstatus_lookup : is_Some (statuses !! id).
+    { apply elem_of_dom.
+      rewrite -Hlookup_dom.
+      apply elem_of_dom.
+      exists (mkLookupInfo key ver γpend γhelp).
+      exact Hlookup_info. }
+    destruct Hstatus_lookup as [st Hstatus_lookup].
+    iDestruct (big_sepM_delete _ _ id with "Hlookup_status_frags") as "[Hst Hlookup_status_frags]"; first exact Hstatus_lookup.
+    iDestruct (big_sepM_delete _ _ id with "Hlookup_interp") as "[Hinterp Hlookup_interp]"; first exact Hstatus_lookup.
+    iDestruct "Hinterp" as (info Φ') "[%Hlookup_info' Hinterp]".
+    iDestruct "Hinterp" as "[#Hsaved_inv Hsem]".
+    have -> : info = mkLookupInfo key ver γpend γhelp.
+    { rewrite Hlookup_info in Hlookup_info'. inversion Hlookup_info'. reflexivity. }
+    iPoseProof (saved_prop_agree with "Hsaved_tok Hsaved_inv") as "Heq".
+    destruct st.
+    - iMod (lc_fupd_elim_later with "Hlc Heq") as "Hpeq".
+      iRewrite -"Hpeq" in "Hsem".
+      iModIntro.
+      iExists hist, (mkLookupInfo key ver γpend γhelp), LookupPending.
+      iFrame "Hst Hsem".
+      iSplitL "Hhistory_auth Hlookups Hlookup_status Hlookup_status_frags Hlookup_interp Hhelp_tok_to Hhelp_to_tok".
+      + iIntros "Hst Hinterp".
+        unfold map_history, lookup_status_frags, lookup_interp_map.
+        rewrite /named.
+        iExists hist, lookups, statuses.
+        iFrame "Hhistory_auth Hlookups Hlookup_status".
+        iSplit; first by iPureIntro.
+        assert (Hstatuses_rebuild : statuses = <[id:=LookupPending]>(delete id statuses)).
+        { apply map_eq.
+          intros j.
+          destruct (decide (j = id)) as [->|Hneq].
+          - rewrite lookup_insert lookup_delete.
+            rewrite decide_True; [done|reflexivity].
+          - rewrite lookup_insert_ne; [|done].
+            rewrite lookup_delete_ne; [done|done]. }
+        iSplitL "Hst Hlookup_status_frags".
+        * rewrite Hstatuses_rebuild /=.
+          rewrite big_sepM_insert.
+          2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+          rewrite -Hstatuses_rebuild.
+          iFrame.
+        * iSplitL "Hinterp Hlookup_interp".
+          { rewrite Hstatuses_rebuild /=.
+            rewrite big_sepM_insert.
+            2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+            iFrame.
+            iSplit; [done|].
+            rewrite -Hstatuses_rebuild.
+            iFrame. }
+          iPureIntro. repeat split; eauto.
+      + iSplit.
+        * iPureIntro. exact Hhistory_cur.
+        * iPureIntro.
+          intros Hold.
+          pose proof (Hlookup_old_done id (mkLookupInfo key ver γpend γhelp) LookupPending Hlookup_info Hstatus_lookup Hold) as Hdone.
+          discriminate.
+    - iModIntro.
+      iExists hist, (mkLookupInfo key ver γpend γhelp), LookupDoneFalse.
+      iFrame "Hst Hsem".
+      iSplitL "Hhistory_auth Hlookups Hlookup_status Hlookup_status_frags Hlookup_interp Hhelp_tok_to Hhelp_to_tok".
+      + iIntros "Hst Hinterp".
+        unfold map_history, lookup_status_frags, lookup_interp_map.
+        rewrite /named.
+        iExists hist, lookups, statuses.
+        iFrame "Hhistory_auth Hlookups Hlookup_status".
+        iSplit; first by iPureIntro.
+        assert (Hstatuses_rebuild : statuses = <[id:=LookupDoneFalse]>(delete id statuses)).
+        { apply map_eq.
+          intros j.
+          destruct (decide (j = id)) as [->|Hneq].
+          - rewrite lookup_insert lookup_delete.
+            rewrite decide_True; [done|reflexivity].
+          - rewrite lookup_insert_ne; [|done].
+            rewrite lookup_delete_ne; [done|done]. }
+        iSplitL "Hst Hlookup_status_frags".
+        * rewrite Hstatuses_rebuild /=.
+          rewrite big_sepM_insert.
+          2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+          rewrite -Hstatuses_rebuild.
+          iFrame.
+        * iSplitL "Hinterp Hlookup_interp".
+          { rewrite Hstatuses_rebuild /=.
+            rewrite big_sepM_insert.
+            2:{ rewrite lookup_delete. rewrite decide_True; [done|reflexivity]. }
+            iFrame.
+            iSplit; [done|].
+            rewrite -Hstatuses_rebuild.
+            iFrame. }
+          iPureIntro. repeat split; eauto.
+      + iSplit.
+        * iPureIntro. exact Hhistory_cur.
+        * iPureIntro.
+          intros Hold.
+          exact (Hlookup_old_done id (mkLookupInfo key ver γpend γhelp) LookupDoneFalse Hlookup_info Hstatus_lookup Hold).
   Qed.
 
   #[global] Opaque map_state.
