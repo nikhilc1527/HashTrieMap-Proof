@@ -978,9 +978,10 @@ Section model.
     iIntros "Hhistory Htok".
     iNamed "Hhistory".
     iDestruct (map_ro_valid with "Hlookups Htok") as %Hlookup_info.
-    apply elem_of_dom_2 in Hlookup_info.
-    rewrite Hlookup_dom in Hlookup_info.
-    apply elem_of_dom in Hlookup_info as [st Hstatus_lookup].
+    pose proof Hlookup_info as Hlookup_info_dom.
+    apply elem_of_dom_2 in Hlookup_info_dom.
+    rewrite Hlookup_dom in Hlookup_info_dom.
+    apply elem_of_dom in Hlookup_info_dom as [st Hstatus_lookup].
     iDestruct (big_sepM_delete _ _ id with "Hlookup_status_frags") as "[Hstatus_frag Hlookup_status_frags]"; first exact Hstatus_lookup.
     iExists st.
     iFrame "Hstatus_frag".
@@ -1054,6 +1055,44 @@ Section model.
     iPureIntro.
     rewrite Hver_eq in Hcur.
     congruence.
+  Qed.
+
+  Lemma map_history_lookup_status_case {γ m id ver key} :
+    map_history γ m -∗
+    lookup_token γ id ver key -∗
+    ∃ hist st,
+      ptsto_mut γ.(lookup_status_name) id 1 st ∗
+      (ptsto_mut γ.(lookup_status_name) id 1 st -∗ map_history γ m) ∗
+      ⌜hist !! map_current_version hist = Some m⌝ ∗
+      ⌜ver < map_current_version hist → ∃ res, st = LookupDone res⌝.
+  Proof.
+    iIntros "Hhistory Htok".
+    iNamed "Hhistory".
+    iDestruct (map_ro_valid with "Hlookups Htok") as %Hlookup_info.
+    pose proof Hlookup_info as Hlookup_info_dom.
+    apply elem_of_dom_2 in Hlookup_info_dom.
+    rewrite Hlookup_dom in Hlookup_info_dom.
+    apply elem_of_dom in Hlookup_info_dom as [st Hstatus_lookup].
+    iDestruct (big_sepM_delete _ _ id with "Hlookup_status_frags") as "[Hst Hlookup_status_frags]";
+      first exact Hstatus_lookup.
+    iDestruct (map_valid with "Hlookup_status Hst") as %Hstatus_info.
+    iExists hist, st.
+    iFrame "Hst".
+    iSplit.
+    - iIntros "Hst".
+      unfold map_history, lookup_status_frags.
+      iExists hist, lookups, statuses.
+      iFrame.
+      iSplit; first done.
+      iSplit.
+      + iApply (big_sepM_delete _ _ id); first exact Hstatus_lookup.
+        iFrame.
+      + iPureIntro.
+        repeat split; done.
+    - iPureIntro.
+      split; first exact Hhistory_cur.
+      intros Hold.
+      eapply Hlookup_old_done; eauto.
   Qed.
 
   #[global] Opaque map_state.
