@@ -28,7 +28,7 @@ Section proof.
     `{!mapG Σ Z (gmap w64 w64)}
     `{!mapG Σ Z gname}
     `{!mapG Σ (Z * nat) (gmap loc nat)}
-    `{!mapG Σ Z (gname * gname)}
+    `{!mapG Σ Z hash_history_names}
     `{!mapG Σ nat (gmap w64 w64)}
     `{!mapG Σ nat lookup_info}
     `{!mapG Σ nat lookup_status}.
