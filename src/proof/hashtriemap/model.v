@@ -28,6 +28,7 @@ Section model.
   Definition indN         : namespace := nroot .@ "indirect".
   Definition entryN       : namespace := nroot .@ "entry".
   Definition lookupProtoN : namespace := nroot .@ "lookup_proto".
+  Definition bucketN      : namespace := nroot .@ "bucket".
 
   (* Ghost state for the hashtriemap. *)
   Record ghost_names := mkNames {
@@ -49,6 +50,7 @@ Section model.
                             buckets_name : gname;
                             (* auth_map (Z * nat) (gmap loc nat) *)
                             idxs_name : gname;
+                            histories_name : gname;
                           }.
 
   (* discount generics *)
@@ -82,70 +84,395 @@ Section model.
     `{!mapG Σ nat lookup_info}
     `{!mapG Σ nat lookup_status}
     `{!mapG Σ (Z * nat) (gmap loc nat) }
-    `{!mapG Σ Z gname}.
+    `{!mapG Σ Z (gname * gname)}.
 
   Definition hash_map : Type := gmap Z (gmap K V).
 
   Definition empty_hash_map : hash_map :=
     gset_to_gmap ∅ (list_to_set full_domain).
 
-  Definition own_domain
-    (γ : ghost_names) (q: Qp) (dom : domain) (f: Z → gmap K V) : iProp Σ :=
-    [∗ list] hash ∈ dom, ptsto_mut γ.(map_name) hash q (f hash).
+  Inductive path_ownership :=
+  | Empty
+  | Singleton (h: Z) (m: gmap K V).
 
-  #[global] Opaque own_domain.
-  #[local] Transparent own_domain.
+  Definition own_hash_history γ q (map : gmap K V) : iProp Σ :=
+    ∃ hist lookups,
+      "Hown_hist" ∷ mono_list_auth_own γ.1 q hist ∗
+      (* default value ∅, if hist is empty *)
+      "%Hlast" ∷ ⌜last hist ∅ = map⌝ ∗
+      "Hown_lookups" ∷ map_ctx γ.2 q lookups
+  (* and whatever else i need to connect the lookup tokens to the history *)
+  .
+
+  #[global] Instance own_hash_history_timeless (γhist : gname * gname) q map : Timeless (own_hash_history γhist q map).
+  Proof.
+    rewrite /own_hash_history.
+    apply _.
+  Qed.
+
+  #[global] Instance own_hash_history_fractional γhist map :
+    Fractional (λ q, own_hash_history γhist q map).
+  Proof.
+    intros p q. rewrite /own_hash_history.
+    iSplit.
+    - iIntros "H1".
+      iNamed "H1".
+      iDestruct "Hown_hist" as "[H1 H2]".
+      iDestruct "Hown_lookups" as "[H3 H4]".
+      iSplitL "H1 H3"; iFrame; done.
+    - iIntros "[H1 H2]".
+      iNamedSuffix "H1" "1".
+      iNamedSuffix "H2" "2".
+      iDestruct (mono_list_auth_own_agree with "Hown_hist1 Hown_hist2") as %[_ ->].
+      iDestruct (map_ctx_agree with "Hown_lookups1 Hown_lookups2") as %->.
+      iCombine "Hown_hist1 Hown_hist2" as "H1".
+      iCombine "Hown_lookups1 Hown_lookups2" as "H2".
+      iFrame.
+      done.
+  Qed.
+
+  #[global] Instance own_hash_history_as_fractional γhist q map :
+    AsFractional (own_hash_history γhist q map) (λ q, own_hash_history γhist q map) q.
+  Proof. split; [done|apply _]. Qed.
+
+  #[global] Instance own_hash_history_combine_gives γhist q1 q2 m1 m2 :
+    CombineSepGives (own_hash_history γhist q1 m1) (own_hash_history γhist q2 m2) (⌜(q1 + q2 ≤ 1)%Qp⌝ ∗ ⌜m1 = m2⌝).
+  Proof.
+    unfold CombineSepGives.
+    iIntros "(H1 & H2)".
+    unfold own_hash_history in *.
+    iNamedSuffix "H1" "1".
+    iNamedSuffix "H2" "2".
+    iDestruct (mono_list_auth_own_agree with "Hown_hist1 Hown_hist2") as %[x ->].
+    iDestruct (map_ctx_agree with "Hown_lookups1 Hown_lookups2") as %->.
+    subst m1 m2.
+    auto.
+  Qed.
+
+  Definition own_domain
+    (γ : ghost_names) (q: Qp) (dom : domain) (ownership : path_ownership) : iProp Σ :=
+    let γmap := γ.(map_name) in
+    let γhists := γ.(histories_name) in
+    match ownership with
+    | Empty =>
+        [∗ list] hash ∈ dom,
+          ∃ γhist map,
+            hash [[γmap]]↦{q} map ∗
+            hash [[γhists]]↦ro γhist ∗
+            own_hash_history γhist q map
+    | Singleton h m =>
+        [∗ list] hash ∈ dom,
+          if decide (hash = h)
+          then
+            hash [[γmap]]↦{q} m
+          else
+            ∃ γhist map,
+              hash [[γmap]]↦{q} map ∗
+              hash [[γhists]]↦ro γhist ∗
+              own_hash_history γhist q map
+    end.
 
   Definition own_path
-    (γ : ghost_names) (q: Qp) (p : path) (f: Z → gmap K V) : iProp Σ :=
-    own_domain γ q (path_to_domain p) f.
+    (γ : ghost_names) (q: Qp) (p : path) (ownership : path_ownership) : iProp Σ :=
+    own_domain γ q (path_to_domain p) ownership.
 
-  #[global] Opaque own_path.
-  #[local] Transparent own_path.
-
-  (* Constant function: all hashes map to empty *)
-  Definition empty_map_fn : Z → gmap K V := λ _, ∅.
-
-  (* Single hash has value, rest are empty *)
-  Definition singleton_map_fn (h: Z) (m: gmap K V) : Z → gmap K V :=
-    λ h', if decide (h' = h) then m else ∅.
-
-  Definition bucket_of_map (m : gmap K V) (h : Z) : gmap K V :=
-    map_filter (λ x : K * V, uint.Z (hash_key x.1) = h) _ m.
-
-  Definition bucket_snapshot (γ : ghost_names) (ver : nat) (h : Z) (bm : gmap K V) : iProp Σ :=
-    ∃ mver,
-      mono_list_idx_own γ.(hist_name) ver mver ∗
-      ⌜bm = bucket_of_map mver h⌝.
-
-  Definition flatten (hm: hash_map) : gmap K V :=
-    map_fold (λ (_: Z) (sub: gmap K V) (acc: gmap K V), sub ∪ acc) ∅ hm.
-
-  #[global] Instance own_path_timeless γ dom q f : Timeless (own_path γ q dom f) := _.
+  #[global] Instance own_path_timeless γ dom q f : Timeless (own_path γ q dom f).
+  Proof.
+    unfold own_path, own_domain.
+    apply _.
+  Qed.
 
   #[global] Instance own_path_fractional γ dom f :
     Fractional (λ q, own_path γ q dom f).
   Proof.
-    intros p q. rewrite /own_path /own_domain -big_sepL_sep.
-    iSplit.
-    - iIntros "H1".
-      iApply (big_sepL_mono with "H1").
-      iIntros (i h Hin) "Hh1".
-      iDestruct "Hh1" as "[Hh1 Hh2]".
-      iFrame.
-    - iIntros "H1".
-      iApply (big_sepL_mono with "H1").
-      iIntros (i h Hin) "Hh1".
-      iDestruct "Hh1" as "[Hh1 Hh2]".
-      iCombine "Hh1 Hh2" as "Hh".
-      iFrame.
+    intros p q. rewrite /own_path /own_domain.
+    destruct f.
+    {
+      iSplit.
+      - iIntros "H1".
+        iApply (fractional_big_sepL _ (
+                    λ n hash y,
+                      ∃ γhist (map : gmap K V),
+                                               hash [[γ.(map_name)]]↦{
+                                               y} map ∗
+                                               hash [[γ.(histories_name)]]↦ro γhist ∗
+                                               own_hash_history γhist (y) map
+                  )%I); [|iFrame].
+        iIntros (i h).
+        iIntros (p0 q0).
+        iSplit.
+        + iIntros "(%a & %b & (H1 & #H2 & H3))".
+          iDestruct "H1" as "[Hh1 Hh2]".
+          iDestruct "H3" as "[Hh3 Hh4]".
+          iFrame.
+          iFrame "#".
+        + iIntros "((%a & %b & H1 & #H2 & H3) & (%a2 & %b2 & H4 & #H5 & H6))".
+          iDestruct (ptsto_agree with "H1 H4") as %->.
+          iDestruct (ptsto_ro_agree with "H2 H5") as %->.
+          iCombine "H1 H4" as "H1".
+          iCombine "H3 H6" as "H".
+          iFrame.
+          iFrame "#".
+      - iIntros "[H1 H2]".
+        iApply (fractional_big_sepL _ (
+                    λ n hash y,
+                      ∃ γhist (map : gmap K V),
+                        hash [[γ.(map_name)]]↦{
+                            y} map ∗
+                        hash [[γ.(histories_name)]]↦ro γhist ∗
+                        own_hash_history γhist (y) map
+                  )%I with "[H1 H2]"); [|iFrame].
+        iIntros (i h).
+        iIntros (p0 q0).
+        iSplit.
+        + iIntros "(%a & %b & (H1 & #H2 & H3))".
+          iDestruct "H1" as "[Hh1 Hh2]".
+          iDestruct "H3" as "[Hh3 Hh4]".
+          iFrame.
+          iFrame "#".
+        + iIntros "((%a & %b & H1 & #H2 & H3) & (%a2 & %b2 & H4 & #H5 & H6))".
+          iDestruct (ptsto_agree with "H1 H4") as %->.
+          iDestruct (ptsto_ro_agree with "H2 H5") as %->.
+          iCombine "H1 H4" as "H1".
+          iCombine "H3 H6" as "H".
+          iFrame.
+          iFrame "#".
+    }
+    {
+      iSplit.
+      - iIntros "H1".
+        iApply (fractional_big_sepL _ (
+                    λ n hash y,
+                      if decide (hash = h)
+                      then hash [[γ.(map_name)]]↦{y} m
+                      else
+                        ∃ γhist (map : gmap K V),
+                          hash [[
+                                γ.(map_name)]]↦{
+                              y} map ∗
+                          hash [[
+                                γ.(histories_name)]]↦ro γhist ∗
+                          own_hash_history γhist (y) map
+                  )%I); [|iFrame].
+        intros i x.
+        iIntros (p0 q0).
+        iSplit.
+        + iIntros "H1".
+          destruct (decide (x = h)).
+          * iDestruct "H1" as "[H1 H2]".
+            iFrame.
+          * iDestruct "H1" as "(%a & %b & (H1 & #H2 & H3))".
+            iDestruct "H1" as "[Hh1 Hh2]".
+            iDestruct "H3" as "[Hh3 Hh4]".
+            iFrame.
+            iFrame "#".
+        + iIntros "H1".
+          destruct (decide (x = h)).
+          * iDestruct "H1" as "[H1 H2]".
+            iCombine "H1 H2" as "H1".
+            iFrame.
+          * iDestruct "H1" as "((%a & %b & H1 & #H2 & H3) & (%a2 & %b2 & H4 & #H5 & H6))".
+            iDestruct (ptsto_agree with "H1 H4") as %->.
+            iDestruct (ptsto_ro_agree with "H2 H5") as %->.
+            iCombine "H1 H4" as "H1".
+            iCombine "H3 H6" as "H".
+            iFrame.
+            iFrame "#".
+      - iIntros "[H1 H2]".
+        iApply (fractional_big_sepL _ (
+                    λ n hash y,
+                      if decide (hash = h)
+                      then hash [[γ.(map_name)]]↦{y} m
+                      else
+                        ∃ γhist (map : gmap K V),
+                          hash [[γ.(map_name)]]↦{y} map ∗
+                          hash [[γ.(histories_name)]]↦ro γhist ∗
+                          own_hash_history γhist (y) map
+                  )%I with "[H1 H2]"); [|iFrame].
+        intros i x.
+        iIntros (p0 q0).
+        iSplit.
+        + iIntros "H1".
+          destruct (decide (x = h)).
+          * iDestruct "H1" as "[H1 H2]".
+            iFrame.
+          * iDestruct "H1" as "(%a & %b & (H1 & #H2 & H3))".
+            iDestruct "H1" as "[Hh1 Hh2]".
+            iDestruct "H3" as "[Hh3 Hh4]".
+            iFrame.
+            iFrame "#".
+        + iIntros "H1".
+          destruct (decide (x = h)).
+          * iDestruct "H1" as "[H1 H2]".
+            iCombine "H1 H2" as "H1".
+            iFrame.
+          * iDestruct "H1" as "((%a & %b & H1 & #H2 & H3) & (%a2 & %b2 & H4 & #H5 & H6))".
+            iDestruct (ptsto_agree with "H1 H4") as %->.
+            iDestruct (ptsto_ro_agree with "H2 H5") as %->.
+            iCombine "H1 H4" as "H1".
+            iCombine "H3 H6" as "H".
+            iFrame.
+            iFrame "#".
+    }
   Qed.
 
   #[global] Instance own_path_as_fractional γ path f q :
     AsFractional (own_path γ q path f) (λ q, own_path γ q path f) q.
+  Proof. split; [done|apply _]. Qed.
+
+  Lemma own_path_acc {γ q p h k} :
+    h = uint.Z (hash_key k) →
+    valid_path p →
+    length p ≤ 16 →
+    belongs_to_path p h →
+    own_path γ q p Empty ⊣⊢
+    ∃ γhist m,
+      own_path γ q p (Singleton h m) ∗
+      h [[γ.(histories_name)]]↦ro γhist ∗
+      own_hash_history γhist q m.
   Proof.
-    split; [done|apply _].
+    intros Hh Hvalid Hlen Hbelongs.
+    rewrite /own_path /own_domain.
+    rewrite (in_domain _ Hh) in Hbelongs.
+    pose proof (path_to_domain_lookup p h Hvalid Hlen Hbelongs) as Hin.
+    pose proof (path_to_domain_split_exact _ _ Hvalid Hlen Hbelongs) as Hsplit.
+    iSplit.
+    - iIntros "Hdom".
+      iEval (rewrite (big_sepL_delete' _ _ _ _ Hin)) in "Hdom".
+      iDestruct "Hdom" as "((%γhist & %map & Ha & Hb & Hc) & Hd)".
+      iExists γhist, map.
+      iSplitR "Hb Hc"; [|iFrame].
+      rewrite Hsplit.
+      iDestruct (big_sepL_app with "Hd") as "[Hb Hc]".
+      iDestruct (big_sepL_app with "Hc") as "[Hc Hd]".
+      rewrite length_seqZ.
+      iApply (big_sepL_app).
+      iSplitL "Hb".
+      {
+        iApply (big_sepL_mono with "Hb").
+        iIntros (i j Hj) "Ha".
+        assert (i ≠ Z.to_nat (h - lo p)) as Hneq.
+        {
+          intros Heq.
+          rewrite Heq in Hj.
+          pose proof (lookup_seqZ_ge (lo p) (h - lo p) (Z.to_nat (h - lo p))).
+          assert (h - lo p <= Z.to_nat (h - lo p)) by lia.
+          specialize (H H0).
+          rewrite Hj in H.
+          apply Some_ne_None in H.
+          exact H.
+        }
+        iSpecialize ("Ha" $! Hneq).
+        rewrite decide_False; [iFrame|].
+        intros Hneq2.
+        rewrite Hneq2 in Hj.
+        rewrite lookup_seqZ in Hj.
+        destruct Hj as [-> Hk].
+        lia.
+      }
+      iApply (big_sepL_app).
+      iSplitL "Ha Hc".
+      {
+        iApply big_sepL_singleton.
+        rewrite decide_True; [|lia].
+        iFrame.
+      }
+      {
+        iApply (big_sepL_mono with "Hd").
+        iIntros (i j Hj) "Ha".
+        rewrite singleton_length.
+        rewrite -in_domain in Hbelongs; [|exact Hh].
+        rewrite shiftr_eq_iff_interval in Hbelongs; unfold sh; [|lia|subst h; word].
+        assert (h - lo p >= 0) by lia.
+        replace (Z.to_nat (h - lo p) + (1 + i))%nat with (Z.to_nat (h - lo p + 1 + i)) by lia.
+        assert (Z.to_nat (h - lo p + 1 + i) ≠ Z.to_nat (h - lo p)) as Hneq by lia.
+        iSpecialize ("Ha" $! Hneq).
+        rewrite decide_False; [iFrame|].
+        intros Hneq2.
+        rewrite Hneq2 in Hj.
+        rewrite lookup_seqZ in Hj.
+        destruct Hj as [Hj Hk].
+        lia.
+      }
+    - iIntros "Hdom".
+      iDestruct "Hdom" as "(%γhist & %map & Ha & Hb & Hc)".
+      rewrite Hsplit.
+      iDestruct (big_sepL_app with "Ha") as "[Hd He]".
+      iDestruct (big_sepL_app with "He") as "[He Hf]".
+      iApply (big_sepL_app).
+      iSplitL "Hd".
+      {
+        iApply (big_sepL_mono with "Hd").
+        iIntros (i j Hj) "Ha".
+        assert (i ≠ Z.to_nat (h - lo p)) as Hneq.
+        {
+          intros Heq.
+          rewrite Heq in Hj.
+          pose proof (lookup_seqZ_ge (lo p) (h - lo p) (Z.to_nat (h - lo p))).
+          assert (h - lo p <= Z.to_nat (h - lo p)) by lia.
+          specialize (H H0).
+          rewrite Hj in H.
+          apply Some_ne_None in H.
+          exact H.
+        }
+        rewrite decide_False; [iFrame|].
+        intros Hneq2.
+        rewrite Hneq2 in Hj.
+        rewrite lookup_seqZ in Hj.
+        destruct Hj as [-> Hk].
+        lia.
+      }
+      iApply (big_sepL_app).
+      iSplitL "Hb Hc He".
+      {
+        iApply big_sepL_singleton.
+        iFrame.
+        iApply (big_sepL_singleton (
+                    λ n y,
+                      if decide (y = h)
+                           then y [[γ.(map_name)]]↦{q} map
+                           else
+                            ∃ γhist0 (map0 : gmap K V),
+                              y [[γ.(map_name)]]↦{q} map0 ∗
+                              y [[γ.(histories_name)]]↦ro γhist0 ∗
+                              own_hash_history γhist0 q map0
+                  )%I) in "He".
+        rewrite decide_True; [|lia].
+        iFrame.
+      }
+      {
+        iApply (big_sepL_mono with "Hf").
+        iIntros (i j Hj) "Ha".
+        rewrite -in_domain in Hbelongs; [|exact Hh].
+        rewrite shiftr_eq_iff_interval in Hbelongs; unfold sh; [|lia|subst h; word].
+        assert (h - lo p >= 0) by lia.
+        replace (Z.to_nat (h - lo p) + (1 + i))%nat with (Z.to_nat (h - lo p + 1 + i)) by lia.
+        assert (Z.to_nat (h - lo p + 1 + i) ≠ Z.to_nat (h - lo p)) as Hneq by lia.
+        rewrite decide_False; [iFrame|].
+        intros Hneq2.
+        rewrite Hneq2 in Hj.
+        rewrite lookup_seqZ in Hj.
+        destruct Hj as [Hj Hk].
+        lia.
+      }
   Qed.
+
+  #[global] Opaque own_domain.
+  #[local] Transparent own_domain.
+
+  #[global] Opaque own_path.
+  #[local] Transparent own_path.
+
+  (* Definition bucket_of_map (m : gmap K V) (h : Z) : gmap K V := *)
+  (*   map_filter (λ x : K * V, uint.Z (hash_key x.1) = h) _ m. *)
+
+  (* Definition bucket_snapshot (γ : ghost_names) (ver : nat) (h : Z) (bm : gmap K V) : iProp Σ := *)
+  (*   ∃ mver, *)
+  (*     mono_list_idx_own γ.(hist_name) ver mver ∗ *)
+  (*     ⌜bm = bucket_of_map mver h⌝. *)
+
+  Definition flatten (hm: hash_map) : gmap K V :=
+    map_fold (λ (_: Z) (sub: gmap K V) (acc: gmap K V), sub ∪ acc) ∅ hm.
 
   Definition own_entry (γ: ghost_names) (q: Qp) (k: K) (v: V) : iProp Σ :=
     ptsto_mut γ.(user_name) k q v.
@@ -215,14 +542,14 @@ Section model.
   Definition bucket (γ : ghost_names) (γbucket : gname) (q: Qp) (hash: Z) (sub : gmap K V) (ver : nat) (first_ent : loc) : iProp Σ :=
     ∃ (entries : gset loc) (idxs : gmap loc nat),
       "Hentries_auth" ∷ auth_set_auth γbucket entries ∗
-      "Hidxs" ∷ ptsto_ro γ.(idxs_name) (hash, ver) idxs ∗
-      "Hfirst" ∷ ⌜idxs !! first_ent = Some 0%nat⌝ ∗
+      "#Hidxs" ∷ ptsto_ro γ.(idxs_name) (hash, ver) idxs ∗
+      "%Hfirst" ∷ ⌜idxs !! first_ent = Some 0%nat⌝ ∗
       "%Hidxs_dom" ∷ ⌜dom idxs = entries⌝ ∗
       ([∗ set] ent ∈ entries,
          ∃ (next : loc) idx,
-           "Hidx" ∷ ⌜idxs !! ent = Some idx⌝ ∗
+           "%Hidx" ∷ ⌜idxs !! ent = Some idx⌝ ∗
            "Hnext" ∷ entry_next ent next (q/2) ∗
-           "Hnext_idx" ∷ ⌜
+           "%Hnext_idx" ∷ ⌜
              if (decide (next ≠ null))
              then (idxs !! next) = Some (S idx)
              else (S idx = size sub)⌝
@@ -232,19 +559,15 @@ Section model.
     (γ: ghost_names) (q: Qp)
     (nodeptr: loc)
     (path: path) : iProp Σ :=
-    ∃ ent map hash γbucket,
-      "Hown_path" ∷ own_path γ q path (singleton_map_fn hash map) ∗
+    ∃ ent map hash γbucket ver,
+      "Hown_path" ∷ own_path γ q path (Singleton hash map) ∗
       "%Hchild_not_null" ∷ ⌜ent ≠ null⌝ ∗
       "#Hchild_ent_ptr" ∷ nodeptr.[hashtriemap.node.t, "ent"] ↦□ ent ∗
       "#Hchild_ind_ptr" ∷ nodeptr.[hashtriemap.node.t, "ind"] ↦□ null ∗
       "#Hchild_entry" ∷ entry γ q ent hash ∗
       "%Hbelongs" ∷ ⌜belongs_to_path path hash⌝ ∗
-      "Hnames" ∷ ptsto_ro γ.(buckets_name) hash γbucket ∗
-      "Hbucket" ∷ (
-          ∀ ver (map : gmap K V),
-            mono_list_idx_own γ.(hist_name) ver map -∗
-            bucket γ γbucket q hash (bucket_of_map map hash) ver ent
-        ).
+      "#Hnames" ∷ ptsto_ro γ.(buckets_name) hash γbucket ∗
+      "Hbucket" ∷ bucket γ γbucket q hash map ver ent.
 
   (* definition of node *)
   Definition childP
@@ -1070,9 +1393,9 @@ Section model.
         eapply Hbuckets_rev; eauto.
   Qed.
 
-  Lemma map_state_register_lookup {γ m hm} (key : K) (Φ : val → iProp Σ) :
+  Lemma map_state_register_lookup {γ m hm E} (key : K) (Φ : val → iProp Σ) :
     map_state γ m hm -∗
-    lookup_pending_au γ key Φ ={⊤}=∗
+    lookup_pending_au γ key Φ ={E}=∗
     ∃ id ver,
       map_state γ m hm ∗
       lookup_token γ id ver key Φ.

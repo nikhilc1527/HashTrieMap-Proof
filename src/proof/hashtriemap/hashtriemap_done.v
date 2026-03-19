@@ -26,6 +26,8 @@ Section proof.
     `{!ghost_varG Σ (gmap w64 w64)}
     `{!mapG Σ w64 w64}
     `{!mapG Σ Z (gmap w64 w64)}
+    `{!mapG Σ Z gname}
+    `{!mapG Σ (Z * nat) (gmap loc nat)}
     `{!mapG Σ nat (gmap w64 w64)}
     `{!mapG Σ nat lookup_info}
     `{!mapG Σ nat lookup_status}.
@@ -117,6 +119,74 @@ Section proof.
     wp_auto.
     iApply "HΦ"; done.
   Qed.
+
+  Instance pe γ γbucket q hash ent : Persistent
+                                       (∀ (ver : nat) (map : gmap K V),
+                                          mono_list_idx_own γ.(hist_name) ver map -∗
+                                          inv bucketN (bucket γ γbucket q hash (bucket_of_map map hash) ver ent)).
+  Proof.
+    unfold Persistent.
+    Locate "<pers>".
+    iIntros.
+    iApply persistently_forall_2.
+    iIntros.
+    iApply persistently_forall_2.
+    iIntros.
+    Search (bi_persistently).
+    apply _.
+    iApply persistently_wand.
+    apply _.
+    iIntros.
+
+  Lemma lookup_start {E}
+    (q : Qp) (nodeptr : loc) (key : K) (γ : ghost_names) (path : path)
+    (m : gmap K V) (hm : hash_map) (Φ : val → iProp Σ) :
+    map_state γ m hm -∗
+    entry_node γ q nodeptr path -∗
+    lookup_pending_au γ key Φ ={E}=∗
+    ∃ (ent : loc) (id ver : nat) (hash : Z) (γbucket : gname)
+      (idxs : gmap loc nat) (γcurm γcuridx : gname),
+      map_state γ m hm ∗
+      entry_node γ q nodeptr path ∗
+      ⌜ent ≠ null⌝ ∗
+      entry γ q ent hash ∗
+      lookup_token γ id ver key Φ ∗
+      ptsto_ro γ.(buckets_name) hash γbucket ∗
+      ptsto_ro γ.(idxs_name) (hash, ver) idxs ∗
+      ghost_var γcurm 1 (∅ : gmap K V) ∗
+      ghost_var γcuridx 1 0%nat ∗
+      ⌜belongs_to_path path hash⌝.
+  Proof.
+    iIntros "Hmap Hchild Hau".
+    iNamed "Hchild".
+    iMod (map_state_register_lookup key Φ with "Hmap Hau") as (id ver) "(Hmap & Hlookup_tok)".
+    iDestruct "Hlookup_tok" as (γdone mver) "(#Hlookup_info & #Hver & #Hlookup_proto & Hdone)".
+    iDestruct "Hbucket" as "#Hbucket".
+    iSpecialize ("Hbucket" $! ver mver with "Hver").
+    iNamed "Hbucket".
+    iMod (ghost_var_alloc (∅ : gmap K V)) as (γcurm) "Hcur_map".
+    iMod (ghost_var_alloc 0%nat) as (γcuridx) "Hcur_idx".
+    iAssert (entry_node γ q nodeptr path)%I with "[Hown_path Hentries_auth Hbucket]" as "Hchild".
+    {
+      unfold entry_node.
+      iNamed.
+      iExists ent, map, hash, γbucket.
+      iFrame "Hown_path".
+      iFrame "#".
+      iSplit; first done.
+      iSplit; first done.
+      rewrite /named.
+      iIntros (ver0 map0) "#Hver0".
+      unfold bucket.
+      iExists entries, idxs.
+      iFrame.
+
+    }
+    iModIntro.
+    iFrame.
+    iFrame "#".
+    done.
+  Admitted.
 
   Definition entry_hit_witness (γ: ghost_names) (q: Qp) (path: path) (key v: K) : iProp Σ :=
     ∃ e: loc,
