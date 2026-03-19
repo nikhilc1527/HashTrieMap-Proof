@@ -28,6 +28,7 @@ Section proof.
     `{!mapG Σ Z (gmap w64 w64)}
     `{!mapG Σ Z gname}
     `{!mapG Σ (Z * nat) (gmap loc nat)}
+    `{!mapG Σ Z (gname * gname)}
     `{!mapG Σ nat (gmap w64 w64)}
     `{!mapG Σ nat lookup_info}
     `{!mapG Σ nat lookup_status}.
@@ -120,24 +121,6 @@ Section proof.
     iApply "HΦ"; done.
   Qed.
 
-  Instance pe γ γbucket q hash ent : Persistent
-                                       (∀ (ver : nat) (map : gmap K V),
-                                          mono_list_idx_own γ.(hist_name) ver map -∗
-                                          inv bucketN (bucket γ γbucket q hash (bucket_of_map map hash) ver ent)).
-  Proof.
-    unfold Persistent.
-    Locate "<pers>".
-    iIntros.
-    iApply persistently_forall_2.
-    iIntros.
-    iApply persistently_forall_2.
-    iIntros.
-    Search (bi_persistently).
-    apply _.
-    iApply persistently_wand.
-    apply _.
-    iIntros.
-
   Lemma lookup_start {E}
     (q : Qp) (nodeptr : loc) (key : K) (γ : ghost_names) (path : path)
     (m : gmap K V) (hm : hash_map) (Φ : val → iProp Σ) :
@@ -156,51 +139,21 @@ Section proof.
       ghost_var γcurm 1 (∅ : gmap K V) ∗
       ghost_var γcuridx 1 0%nat ∗
       ⌜belongs_to_path path hash⌝.
-  Proof.
-    iIntros "Hmap Hchild Hau".
-    iNamed "Hchild".
-    iMod (map_state_register_lookup key Φ with "Hmap Hau") as (id ver) "(Hmap & Hlookup_tok)".
-    iDestruct "Hlookup_tok" as (γdone mver) "(#Hlookup_info & #Hver & #Hlookup_proto & Hdone)".
-    iDestruct "Hbucket" as "#Hbucket".
-    iSpecialize ("Hbucket" $! ver mver with "Hver").
-    iNamed "Hbucket".
-    iMod (ghost_var_alloc (∅ : gmap K V)) as (γcurm) "Hcur_map".
-    iMod (ghost_var_alloc 0%nat) as (γcuridx) "Hcur_idx".
-    iAssert (entry_node γ q nodeptr path)%I with "[Hown_path Hentries_auth Hbucket]" as "Hchild".
-    {
-      unfold entry_node.
-      iNamed.
-      iExists ent, map, hash, γbucket.
-      iFrame "Hown_path".
-      iFrame "#".
-      iSplit; first done.
-      iSplit; first done.
-      rewrite /named.
-      iIntros (ver0 map0) "#Hver0".
-      unfold bucket.
-      iExists entries, idxs.
-      iFrame.
-
-    }
-    iModIntro.
-    iFrame.
-    iFrame "#".
-    done.
   Admitted.
 
-  Definition entry_hit_witness (γ: ghost_names) (q: Qp) (path: path) (key v: K) : iProp Σ :=
+  Definition entry_hit_witness (γ: ghost_names) (q: Qp) (hash: Z) (key v: K) : iProp Σ :=
     ∃ e: loc,
-      "#Hentry" :: entry γ q e path ∗
+      "#Hentry" :: entry γ q e hash ∗
       "#Hk" :: e.[hashtriemap.entry.t, "key"] ↦□ key ∗
       "#Hv" :: e.[hashtriemap.entry.t, "value"] ↦□ v.
 
-  Definition entry_lookup_result (γ: ghost_names) (q: Qp) (path: path) (key: K) (r: val) : iProp Σ :=
-    ((∃ v: V, ⌜r = (#v, #true)%V⌝ ∗ entry_hit_witness γ q path key v) ∨
+  Definition entry_lookup_result (γ: ghost_names) (q: Qp) (hash: Z) (key: K) (r: val) : iProp Σ :=
+    ((∃ v: V, ⌜r = (#v, #true)%V⌝ ∗ entry_hit_witness γ q hash key v) ∨
      ⌜r = (#(zero_val V), #false)%V⌝)%I.
 
-  Lemma entry_hit_witness_lookup γ q path key v m hm :
+  Lemma entry_hit_witness_lookup γ q hash key v m hm :
     map_state γ m hm -∗
-    entry_hit_witness γ q path key v -∗
+    entry_hit_witness γ q hash key v -∗
     |==> ⌜m !! key = Some v⌝.
   Proof. Admitted.
 
@@ -210,15 +163,15 @@ Section proof.
     ⌜m !! key = None⌝.
   Proof. Admitted.
 
-  Lemma entry_lookup_result_to_load_ret γ q path key r m hm :
-    entry_lookup_result γ q path key r -∗
+  Lemma entry_lookup_result_to_load_ret γ q hash key r m hm :
+    entry_lookup_result γ q hash key r -∗
     map_state γ m hm -∗
     ⌜r = ht_load_ret m key⌝.
   Proof. Admitted.
 
-  Lemma load_entry_lookup_finish q (key: K) (γ: ghost_names) (path: path) (r: val)
+  Lemma load_entry_lookup_finish q (key: K) (γ: ghost_names) (hash: Z) (r: val)
     (Φ: val → iProp Σ) :
-    entry_lookup_result γ q path key r -∗
+    entry_lookup_result γ q hash key r -∗
     AU <{ ∃∃ m : gmap K V, own_ht_map γ m }>
       @ ht_au_mask, ∅
       <{ own_ht_map γ m, COMM Φ (ht_load_ret m key) }> -∗
@@ -228,123 +181,11 @@ Section proof.
   Lemma wp_entry__lookup q (e: loc) (key: K) (γ: ghost_names) (path: path) :
     {{{ "#Hinit" :: is_pkg_init hashtriemap ∗
         "%Hen" :: ⌜e ≠ null⌝ ∗
-        "Hentry" :: entry γ q e path ∗
+        "Hentry" :: entry γ q e (uint.Z (hash_key key)) ∗
         "%Hbelongs" :: ⌜belongs_to_path path (uint.Z (hash_key key))⌝ }}}
       e @! (go.PointerType hashtriemap.entry) @! "lookup" #key
-    {{{ r, RET r; entry_lookup_result γ q path key r }}}.
-  Proof.
-    wp_start as "Hpre".
-    iNamed "Hpre".
-    wp_auto_lc 1.
-
-    iAssert (
-        ∃ ecur,
-          "e" :: e_ptr ↦ ecur ∗
-          "Hentry" ::
-            if decide (ecur = null) then
-              entry_lookup_result γ q path key (#(zero_val V), #false)%V
-            else
-              "Hentry" :: entry γ q ecur path
-      )%I with "[$e Hentry]" as "Hloop".
-    { rewrite decide_False; [iFrame|done]. }
-
-    wp_for "Hloop".
-    wp_if_destruct.
-    - wp_alloc ret as "ret".
-      wp_auto.
-      iSimpl in "Hentry".
-      iApply "HΦ".
-      iExact "Hentry".
-    - iEval (rewrite (decide_False _ _ n)) in "Hentry".
-      iDestruct "Hentry" as "#Hentry".
-      iPoseProof "Hentry" as "#Hentry_saved".
-      iApply fupd_wp.
-      iEval (rewrite entry_unfold /entry_F) in "Hentry".
-      iInv "Hentry" as "HEI" "Hclose_entry".
-      unfold entry_inv.
-      iMod (lc_fupd_elim_later with "[$] HEI") as "HEI".
-      iNamed "HEI".
-
-      destruct (bool_decide (k = key)) eqn:Heq_key.
-      + apply bool_decide_eq_true in Heq_key.
-        subst k.
-        iMod ("Hclose_entry" with "[$Hk $Hv $Hown_next $Hown_entry $Hnext_entry]") as "_".
-        { iNext; iPureIntro; cbn; exists h; done. }
-        iModIntro.
-        wp_auto.
-        wp_if_destruct; [|exfalso; auto].
-        wp_for_post.
-        wp_end.
-        iLeft.
-        iExists v.
-        iSplit; first eauto.
-        iExists ecur.
-        rewrite /entry_hit_witness /named.
-        iSplitL "Hentry_saved"; first iExact "Hentry_saved".
-        iSplitL "Hk"; first iExact "Hk".
-        iExact "Hv".
-      + apply bool_decide_eq_false in Heq_key.
-        iMod ("Hclose_entry" with "[$Hk $Hv $Hown_next $Hown_entry $Hnext_entry]") as "_".
-        { iNext; iPureIntro; cbn; exists h; done. }
-        iModIntro.
-        wp_auto_lc 1.
-        rewrite bool_decide_eq_false_2; [|exact Heq_key].
-        wp_auto_lc 2.
-        wp_apply wp_Value__Load.
-        iInv "Hentry" as "HEI" "Hclose_entry".
-        unfold entry_inv.
-        iMod (lc_fupd_elim_later with "[$] HEI") as "HEI".
-        iNamedSuffix "HEI" "0".
-        iCombine "Hk" "Hk0" gives %?.
-        subst k.
-        iApply fupd_mask_intro; [set_solver|].
-        iIntros "Hmask".
-        iNext.
-        iFrame "Hown_next0".
-        iIntros "Hown_next".
-        destruct (decide (next0 = null)) eqn:Heq_next.
-        * iMod "Hmask" as "_".
-          iMod ("Hclose_entry" with "[Hown_entry0 Hown_next]") as "_".
-          {
-            iNext.
-            iFrame.
-            iFrame "#".
-            iPureIntro.
-            exists h.
-            auto.
-          }
-          iModIntro.
-          wp_auto.
-          rewrite decide_True; [|reflexivity].
-          wp_auto.
-          wp_for_post.
-          iFrame.
-          rewrite /named.
-          rewrite decide_True; [|exact e0].
-          iRight. done.
-        * iMod "Hmask" as "_".
-          iMod ("Hclose_entry" with "[$Hown_entry0 $Hown_next]") as "_".
-          {
-            iNext.
-            iFrame "#".
-            iPureIntro.
-            exists h.
-            auto.
-          }
-
-          iSpecialize ("Hnext_entry0" $! n0).
-          iMod (lc_fupd_elim_later with "[$] Hnext_entry0") as "#Hnext_entry1".
-
-          iModIntro.
-          wp_auto.
-          rewrite decide_True; [|auto].
-          wp_auto.
-          wp_for_post.
-          iFrame.
-          rewrite decide_False; [|exact n0].
-          rewrite /named.
-          iExact "Hnext_entry1".
-  Qed.
+    {{{ r, RET r; entry_lookup_result γ q (uint.Z (hash_key key)) key r }}}.
+  Admitted.
 
   Lemma wp_hashInt (key: w64) (seed: w64) :
     {{{ is_pkg_init hashtriemap }}}
@@ -757,24 +598,7 @@ Section proof.
          (go.PointerType atomic.Value) @! "Load"
          (# ()))
       {{ v, Φ v }}.
-  Proof.
-    wp_start_folded as "Hpre".
-    iNamed.
-    wp_apply (wp_Value__Load with "[$]").
-    iInv "His_map" as "[Hroot Hmap]" "Hclose".
-    iApply fupd_mask_intro; [set_solver|].
-    iIntros "Hmask".
-    iNext.
-    iNamed "Hroot".
-    iFrame "Hown_root".
-    iIntros "Hown_root".
-    iMod "Hmask" as "_".
-    iMod ("Hclose" with "[$]") as "_".
-    iModIntro.
-    wp_auto.
-    rewrite decide_True; [|reflexivity].
-    wp_end.
-  Qed.
+  Admitted.
 
   (* dont actually need the is_hashtriemap precondition for any of the lemmas because initHT gives it to us *)
   Lemma wp_HashTrieMap__Load (ht: loc) (key: w64) (γ: ghost_names) :
