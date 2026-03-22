@@ -71,7 +71,8 @@ Section model.
 
   Inductive lookup_status :=
   | LookupPending
-  | LookupDone.
+  | LookupDone
+  | LookupConsumed.
 
   (* Abstract map state seen by clients. *)
   Definition own_ht_map (γ: ghost_names) (m: gmap K V) : iProp Σ :=
@@ -84,29 +85,21 @@ Section model.
     end)%V.
 
   Definition ht_au_mask : coPset :=
-    ⊤ ∖ ↑mapN ∖ ↑indN ∖ ↑entryN.
+    ⊤ ∖ ↑mapN ∖ ↑indN ∖ ↑entryN ∖ ↑lookupInterpN.
 
   Record lookup_info := mkLookupInfo {
                             lookup_key : K;
                             lookup_version : nat;
                             lookup_done_name : gname;
+                            lookup_consumed_name : gname;
                           }.
 
   Context `{!mapG Σ nat lookup_info}.
 
-  Definition lookup_status_interp
-    (γ : ghost_names) (linfo : lookup_info) (status : lookup_status) : iProp Σ :=
-        match status with
-        | LookupPending =>
-            (|={⊤∖↑lookupEscrowN,∅}=> ∃ m, (own_ht_map γ m) ∗ (own_ht_map γ m ={∅,⊤∖↑lookupEscrowN}=∗ token linfo.(lookup_done_name)))
-        | LookupDone =>
-            token linfo.(lookup_done_name)
-        end.
-
   Lemma alloc_lookup_help_token {E} (P : iProp Σ) :
     ⊢ |={E}=> ∃ γdone,
-        (token γdone ={↑lookupEscrowN}=∗ ▷ P) ∗
-        (▷ P ={↑lookupEscrowN}=∗ token γdone).
+        "Htok_to_P" ∷ (token γdone ={↑lookupEscrowN}=∗ ▷ P) ∗
+        "HP_to_tok" ∷ (▷ P ={↑lookupEscrowN}=∗ token γdone).
   Proof.
     iMod (token_alloc) as "[%γdone Htok]".
     iMod (token_alloc) as "[%γdone2 Htok2]".
@@ -136,86 +129,129 @@ Section model.
   | Empty
   | Singleton (h: Z) (m: gmap K V).
 
-  Definition own_hash_history γ (γh : hash_history_names) h q (map : gmap K V) : iProp Σ :=
-    ∃ hist (lookups : gmap nat lookup_info),
+  Definition lookup_status_interp
+    (γ : ghost_names) (linfo : lookup_info) (status : lookup_status) m : iProp Σ :=
+        match status with
+        | LookupPending =>
+            (|={⊤∖↑lookupInterpN,∅}=> own_ht_map γ m ∗
+                                          (own_ht_map γ m ={∅,⊤∖↑lookupInterpN}=∗
+                                           token linfo.(lookup_done_name)))
+        | LookupDone =>
+            |={⊤∖↑lookupInterpN,∅}=> token linfo.(lookup_done_name) ∗ (|={∅,⊤ ∖ ↑lookupInterpN}=> emp)
+        | LookupConsumed =>
+            token linfo.(lookup_consumed_name)
+        end.
+
+  Definition own_hash_history γ (γh : hash_history_names) h q map : iProp Σ :=
+    ∃ (hist : list (gmap K V)) (lookups : gmap nat lookup_info),
       "#Hhist_name" ∷ ptsto_ro γ.(histories_name) h γh ∗
       "Hown_hist" ∷ mono_list_auth_own γh.(hh_hist_name) q hist ∗
-      "%Hhistory_cur" ∷ ⌜hist !! map_current_version hist = Some map⌝ ∗
+      "%Hcur" ∷ ⌜hist !! map_current_version hist = Some map⌝ ∗
       "Hown_lookups" ∷ map_ctx γh.(hh_lookup_name) q lookups ∗
       "Hlookups" ∷
         ([∗ map] id ↦ linfo ∈ lookups,
            (ptsto_mut γh.(hh_lookup_name) id (q/2) linfo ∗
-            (∃ status,
-                ⌜linfo.(lookup_version) < length hist⌝ ∗
-                ⌜linfo.(lookup_version) < length hist - 1 → status ≠ LookupPending⌝ ∗
-                inv (lookupInterpN) (
-                    lookup_status_interp γ linfo status
-                  )
-            )
+            ⌜linfo.(lookup_version) < length hist⌝ ∗
+            inv lookupInterpN (
+                ∃ status mver,
+                  mono_list_idx_own γh.(hh_hist_name) linfo.(lookup_version) mver ∗
+                  ⌜linfo.(lookup_version) < length hist - 1 → status ≠ LookupPending⌝ ∗
+                  lookup_status_interp γ linfo status mver
+              )
            )
         ).
 
-  #[global] Instance own_hash_history_fractional γ h γhist map :
-    Fractional (λ q, own_hash_history γ γhist h q map).
+  #[global] Instance own_hash_history_fractional γ γh h m :
+    Fractional (λ q, own_hash_history γ γh h q m).
   Proof.
     intros p q.
     unfold own_hash_history.
-    replace ((p + q) / 2)%Qp with (p / 2 + q / 2)%Qp by (rewrite -Qp.div_add_distr; reflexivity).
     iSplit.
-    - iIntros "H1".
-      iNamed "H1".
+    - iIntros "x"; iNamed "x".
       iDestruct "Hown_hist" as "[Hh1 Hh2]".
-      iDestruct "Hown_lookups" as "[Hl1 Hl2]".
+      iDestruct "Hown_lookups" as "[Hlookups1 Hlookups2]".
       iFrame.
       iFrame "#".
-      iAssert (⌜hist !! map_current_version hist = Some map⌝)%I as "Hcur"; [done|].
-      iFrame "Hcur".
-      iDestruct (fractional_big_sepM with "Hlookups") as "[Hl1 Hl2]".
-      iSplitL "Hl1".
-      {
-        iApply (big_sepM_mono with "Hl1").
-        iIntros (i linfo Hlookup) "Hinv".
-        iDestruct "Hinv" as "[Hptsto Hinv]".
+      iDestruct (fractional_big_sepM lookups (
+                     (λ id linfo q0,
+                        id [[γh.(hh_lookup_name)]]↦{
+                            q0 / 2} linfo ∗ ⌜linfo.(lookup_version) < length hist⌝ ∗
+                        inv lookupInterpN
+                          (∃ (status : lookup_status) mver,
+                              mono_list_idx_own γh.(hh_hist_name) linfo.(lookup_version) mver ∗
+                              ⌜linfo.(lookup_version) < length hist - 1
+                              → status ≠ LookupPending⌝ ∗
+                              lookup_status_interp γ linfo status mver)
+                     )%I
+                   ) with "Hlookups") as "[Hl1 Hl2]"; [|iFrame; done].
+      iIntros (id linfo).
+      intros x y.
+      iSplit.
+      + iIntros "(a & %b & #c)".
+        replace ((x + y) / 2)%Qp with (x / 2 + y / 2)%Qp by (rewrite Qp.div_add_distr; reflexivity).
+        iDestruct "a" as "[a1 a2]".
+        iSplitL "a1".
+        * iFrame.
+          iFrame "#".
+          done.
+        * iFrame.
+          iFrame "#".
+          done.
+      + iIntros "((a & %z & c) & (b & _ & _))".
+        iCombine "a b" as "a".
+        replace ((x + y) / 2)%Qp with (x / 2 + y / 2)%Qp by (rewrite Qp.div_add_distr; reflexivity).
         iFrame.
-      }
-      {
-        iApply (big_sepM_mono with "Hl2").
-        iIntros (i linfo Hlookup) "Hinv".
-        iDestruct "Hinv" as "[Hptsto Hinv]".
-        iFrame.
-      }
-    - iIntros "[H1 H2]".
-      iNamedSuffix "H1" "1".
-      iNamedSuffix "H2" "2".
+        done.
+    - iIntros "[a b]".
+      iNamedSuffix "a" "1".
+      iNamedSuffix "b" "2".
       iDestruct (mono_list_auth_own_agree with "Hown_hist1 Hown_hist2") as %[_ ->].
-      iCombine "Hown_hist1 Hown_hist2" as "Hown_hist".
+      iCombine "Hown_hist1 Hown_hist2" as "Hh".
       iDestruct (map_ctx_agree with "Hown_lookups1 Hown_lookups2") as %->.
-      iCombine "Hown_lookups1 Hown_lookups2" as "Hown_lookups".
+      iCombine "Hown_lookups1 Hown_lookups2" as "Hlookups".
       iFrame.
       iFrame "#".
-      iAssert (⌜hist0 !! map_current_version hist0 = Some map⌝)%I as "Hcur"; [done|].
-      iFrame "Hcur".
-      iApply (fractional_big_sepM with "[Hlookups1 Hlookups2]").
-      iFrame.
+      iSplitR; [done|].
+      iDestruct (fractional_big_sepM lookups0 (
+                     (λ id linfo q0,
+                        id [[γh.(hh_lookup_name)]]↦{
+                            q0 / 2} linfo ∗ ⌜linfo.(lookup_version) < length hist0⌝ ∗
+                        inv lookupInterpN
+                          (∃ (status : lookup_status) mver,
+                              mono_list_idx_own γh.(hh_hist_name) linfo.(lookup_version) mver ∗
+                              ⌜linfo.(lookup_version) < length hist0 - 1
+                              → status ≠ LookupPending⌝ ∗
+                              lookup_status_interp γ linfo status mver)
+                     )%I
+                   ) with "[Hlookups1 Hlookups2]") as "Hl".
+      2: iFrame.
+      2: {
+        replace (p + q)%Qp with (q + p)%Qp by (rewrite Qp.add_comm; reflexivity).
+        iFrame.
+      }
+      iIntros (id linfo).
+      intros x y.
+      iSplit.
+      + iIntros "(a & %b & #c)".
+        replace ((x + y) / 2)%Qp with (x / 2 + y / 2)%Qp by (rewrite Qp.div_add_distr; reflexivity).
+        iDestruct "a" as "[a1 a2]".
+        iSplitL "a1".
+        * iFrame.
+          iFrame "#".
+          done.
+        * iFrame.
+          iFrame "#".
+          done.
+      + iIntros "((a & %z & c) & (b & _ & _))".
+        iCombine "a b" as "a".
+        replace ((x + y) / 2)%Qp with (x / 2 + y / 2)%Qp by (rewrite Qp.div_add_distr; reflexivity).
+        iFrame.
+        done.
   Qed.
 
-  #[global] Instance own_hash_history_as_fractional γ γhist h map q :
-    AsFractional (own_hash_history γ γhist h q map) (λ q, own_hash_history γ γhist h q map) q.
+  #[global] Instance own_hash_history_as_fractional γ γh h q m :
+    AsFractional (own_hash_history γ γh h q m) (λ q, own_hash_history γ γh h q m) q.
   Proof. split; [done|apply _]. Qed.
-
-  #[global] Instance own_hash_history_combine_gives γ γhist h q1 q2 m1 m2 :
-    CombineSepGives (own_hash_history γ γhist h q1 m1) (own_hash_history γ γhist h q2 m2) (⌜(q1 + q2 ≤ 1)%Qp⌝ ∗ ⌜m1 = m2⌝).
-  Proof.
-    unfold CombineSepGives.
-    iIntros "[H1 H2]".
-    iNamedSuffix "H1" "1".
-    iNamedSuffix "H2" "2".
-    iDestruct (mono_list_auth_own_agree with "Hown_hist1 Hown_hist2") as %[-> ->].
-    iDestruct (map_ctx_agree with "Hown_lookups1 Hown_lookups2") as %->.
-    rewrite Hhistory_cur1 in Hhistory_cur2.
-    inversion Hhistory_cur2.
-    auto.
-  Qed.
 
   Definition own_domain
     (γ : ghost_names) (q: Qp) (dom : domain) (ownership : path_ownership) : iProp Σ :=
@@ -224,7 +260,7 @@ Section model.
     match ownership with
     | Empty =>
         [∗ list] hash ∈ dom,
-          ∃ γhist map,
+          ∃ γhist (map : gmap K V),
             hash [[γmap]]↦{q} map ∗
             hash [[γhists]]↦ro γhist ∗
             own_hash_history γ γhist hash q map
@@ -234,7 +270,7 @@ Section model.
           then
             hash [[γmap]]↦{q} m
           else
-            ∃ γhist map,
+            ∃ γhist (map : gmap K V),
               hash [[γmap]]↦{q} map ∗
               hash [[γhists]]↦ro γhist ∗
               own_hash_history γ γhist hash q map
@@ -423,7 +459,7 @@ Section model.
           specialize (H H0).
           rewrite Hj in H.
           apply Some_ne_None in H.
-          exact H.
+          done.
         }
         iSpecialize ("Ha" $! Hneq).
         rewrite decide_False; [iFrame|].
@@ -709,11 +745,12 @@ Section model.
 
   Definition lookup_token
     (γ : ghost_names) (id ver : nat) (key : K) : iProp Σ :=
-    ∃ h γhist γdone (mver : gmap K V),
+    ∃ (h : Z) γhist γdone (mver : gmap K V) γconsumed,
       "%Hhash" ∷ ⌜h = uint.Z (hash_key key)⌝ ∗
       "#Hhist_name" ∷ ptsto_ro γ.(histories_name) h γhist ∗
-      "Hlookup_info" ∷ ptsto_mut γhist.(hh_lookup_name) id (1/2) (mkLookupInfo key ver γdone) ∗
-      "#Hver" ∷ mono_list_idx_own γhist.(hh_hist_name) ver mver.
+      "Hlookup_info" ∷ ptsto_mut γhist.(hh_lookup_name) id (1/2) (mkLookupInfo key ver γdone γconsumed) ∗
+      "#Hver" ∷ mono_list_idx_own γhist.(hh_hist_name) ver mver ∗
+      "Hconsumed_token" ∷ token γconsumed.
 
   Definition buckets_map (γ: ghost_names) : iProp Σ :=
     (* ∃ buckets, *)
@@ -810,7 +847,8 @@ Section model.
     `{!mapG Σ nat lookup_info, !mapG Σ Z gname,
       !mapG Σ (Z * nat) (gmap loc nat), !mapG Σ Z hash_history_names} :
     ⊢ |==> ∃ γ,
-      init_tok γ false ∗ init_tok γ false.
+      "Hinit_tok1" ∷ init_tok γ false ∗
+      "Hinit_tok2" ∷ init_tok γ false.
   Proof.
     iMod (ghost_var_alloc (false)) as (init_γ) "[Hinit1 Hinit2]".
     iMod (ghost_var_alloc (∅ : gmap K V)) as (map_γ) "Hmap".
@@ -832,8 +870,8 @@ Section model.
       !mapG Σ (Z * nat) (gmap loc nat), !mapG Σ Z hash_history_names}
     {sync_sem : sync.Assumptions} {E}
     (ht: loc) :
-    ht ↦ zero_val hashtriemap.HashTrieMap.t ={E}=∗
-    ∃ γ, hashtriemap_init ht γ.
+    "Hht" ∷ ht ↦ zero_val hashtriemap.HashTrieMap.t ={E}=∗
+    ∃ γ, "Hht_init" ∷ hashtriemap_init ht γ.
   Proof.
     iIntros "Hht".
     iDestruct (typed_pointsto_split with "Hht") as "Hfields".
@@ -865,9 +903,9 @@ Section model.
 
   Lemma own_path_lookup h path γ q m :
     h ∈ path_to_domain path →
-    own_path γ q path (Singleton h m) -∗
-    ptsto_mut γ.(map_name) h q m ∗
-      (ptsto_mut γ.(map_name) h q m -∗ own_path γ q path (Singleton h m)).
+    "Hpath" ∷ own_path γ q path (Singleton h m) -∗
+    "Hptsto" ∷ ptsto_mut γ.(map_name) h q m ∗
+    "Hclose" ∷ (ptsto_mut γ.(map_name) h q m -∗ own_path γ q path (Singleton h m)).
   Proof.
     iIntros (Hdom) "Hpath".
     Local Transparent own_path.
@@ -1064,11 +1102,12 @@ Section model.
 
   Lemma hm_lookup {h path γ m hm q sub} :
     h ∈ path_to_domain path →
-    map_state γ m hm -∗
-    own_path γ q path (Singleton h sub) -∗
+    "Hmap_state" ∷ map_state γ m hm -∗
+    "Hown_path" ∷ own_path γ q path (Singleton h sub) -∗
     ⌜hm !! h = Some sub⌝.
   Proof.
     iIntros (Hdom) "Hmap_state Hown_path".
+    iNamed "Hmap_state".
     iNamed "Hmap_state".
     iDestruct (own_path_lookup h _ _ _ _ Hdom with "Hown_path") as "[Hptsto _]".
     iDestruct (map_valid with "Hauth_map Hptsto") as %Hlookup.
@@ -1076,11 +1115,12 @@ Section model.
   Qed.
 
   Lemma entry_lookup {γ q k v m hm} :
-    map_state γ m hm -∗
-    own_entry γ q k v -∗
+    "Hmap_state" ∷ map_state γ m hm -∗
+    "Hentry" ∷ own_entry γ q k v -∗
     ⌜m !! k = Some v⌝.
   Proof.
     iIntros "Hmap_state Hentry".
+    iNamed "Hmap_state".
     iNamed "Hmap_state".
     unfold own_entry, own_ht_map.
     iDestruct (map_valid with "Huser_map Hentry") as %Hlookup.
@@ -1090,12 +1130,13 @@ Section model.
   Lemma user_map_lookup {h path γ m hm q k sub} :
     h ∈ path_to_domain path →
     h = uint.Z (hash_key k) →
-    map_state γ m hm -∗
-    own_path γ q path (Singleton h sub) -∗
+    "Hmap_state" ∷ map_state γ m hm -∗
+    "Hown_path" ∷ own_path γ q path (Singleton h sub) -∗
     ⌜m !! k = sub !! k⌝.
   Proof.
     iIntros (Hdom Hh) "Hmap_state Hown_path".
     iDestruct (hm_lookup Hdom with "Hmap_state Hown_path") as %Hhm.
+    iNamed "Hmap_state".
     iNamed "Hmap_state".
     rewrite Hflat.
     iPureIntro.
@@ -1103,9 +1144,12 @@ Section model.
   Qed.
 
   Lemma map_state_agree {γ m m2 hm} :
-    map_state γ m hm -∗ own_ht_map γ m2 -∗ ⌜m = m2⌝.
+    "Hmap_state" ∷ map_state γ m hm -∗
+    "Huser_map2" ∷ own_ht_map γ m2 -∗
+    ⌜m = m2⌝.
   Proof.
     iIntros "Hmap_state Huser_map2".
+    iNamed "Hmap_state".
     iNamed "Hmap_state".
     iDestruct (map_ctx_agree with "Huser_map Huser_map2") as %Hx.
     done.
@@ -1113,12 +1157,13 @@ Section model.
 
   Lemma map_state_bucket_of_path {h path γ m hm q sub} :
     h ∈ path_to_domain path →
-    map_state γ m hm -∗
-    own_path γ q path (Singleton h sub) -∗
+    "Hmap_state" ∷ map_state γ m hm -∗
+    "Hown_path" ∷ own_path γ q path (Singleton h sub) -∗
     ⌜sub = bucket_of_map m h⌝.
   Proof.
     iIntros (Hdom) "Hmap_state Hown_path".
     iDestruct (hm_lookup Hdom with "Hmap_state Hown_path") as %Hhm.
+    iNamed "Hmap_state".
     iNamed "Hmap_state".
     iPureIntro.
     have Hhm_sub : hm !! h = Some sub.
@@ -1161,14 +1206,13 @@ Section model.
       eapply Hbuckets_rev; eauto using Hhm_sub.
   Qed.
 
-  Lemma own_hash_history_snapshot {γ h q} (γhist : hash_history_names) m :
-    own_hash_history γ γhist h q m -∗
-    ∃ hist,
-      own_hash_history γ γhist h q m ∗
-      mono_list_lb_own γhist.(hh_hist_name) hist ∗
-      ⌜hist !! map_current_version hist = Some m⌝.
+  Lemma own_hash_history_snapshot {γ h q m} (γhist : hash_history_names) :
+    "Hhist" ∷ own_hash_history γ γhist h q m -∗
+    ∃ (hist : list (gmap K V)),
+      "Hhist" ∷ own_hash_history γ γhist h q m ∗
+      "#Hhist_lb" ∷ mono_list_lb_own γhist.(hh_hist_name) hist.
   Proof.
-    iIntros "Hhist"; iNamed "Hhist".
+    iIntros "Hhist"; iNamed "Hhist"; iNamed "Hhist".
     iExists hist.
     iDestruct (mono_list_lb_own_get with "Hown_hist") as "#Hhist_lb".
     iFrame.
@@ -1178,8 +1222,8 @@ Section model.
 
   Lemma own_hash_history_current_eq_from_snapshot
     (γhist : hash_history_names) hist ver mcur mver :
-    mono_list_lb_own γhist.(hh_hist_name) hist -∗
-    mono_list_idx_own γhist.(hh_hist_name) ver mver -∗
+    "#Hhist_lb" ∷ mono_list_lb_own γhist.(hh_hist_name) hist -∗
+    "#Hidx" ∷ mono_list_idx_own γhist.(hh_hist_name) ver mver -∗
     ⌜hist !! map_current_version hist = Some mcur⌝ -∗
     ⌜map_current_version hist = ver⌝ -∗
     ⌜mcur = mver⌝.
@@ -1293,59 +1337,137 @@ Section model.
   Qed.
 
   Lemma map_state_version_insert
-    {γ path hm user_map user_map2 h old γhist} key value
+    {γ path hm user_map user_map2 h old γhist E} key value
     (Hhash : h = uint.Z (hash_key key))
     (Hnone : user_map !! key = None)
-    (Hbelongs : belongs_to_path path h) :
+    (Hbelongs : belongs_to_path path h)
+    (Hlookup_mask : ↑lookupInterpN ⊆ E) :
     let new := <[key:=value]> old in
     let um' := <[key:=value]> user_map in
     let hm' := <[h := new]> hm in
     "Hmap" ∷ map_state γ user_map hm ∗
     "Huser_map2" ∷ own_ht_map γ user_map2 ∗
     "Hpath" ∷ own_path γ 1 path (Singleton h old) ∗
-    "#Hhist_name" ∷ ptsto_ro γ.(histories_name) h γhist ∗
-    "Hhist" ∷ own_hash_history γ γhist h 1 old ∗
-    "Hfinish_old" ∷ (own_hash_history γ γhist h 1 old ==∗ own_hash_history γ γhist h 1 new)
-    ==∗
+    "Hhist" ∷ own_hash_history γ γhist h 1 old
+    (* "Hupdates" ∷  *)
+    ={E}=∗
     "Hmap" ∷ map_state γ um' hm' ∗
     "Huser_map2" ∷ own_ht_map γ um' ∗
-    "Hpath" ∷ own_path γ 1 path (Singleton h (<[key:=value]> old)) ∗
-    "#Hhist_name" ∷ ptsto_ro γ.(histories_name) h γhist ∗
-    "Hhist" ∷ own_hash_history γ γhist h 1 (<[key:=value]> old) ∗
+    "Hpath" ∷ own_path γ 1 path (Singleton h new) ∗
+    "Hhist" ∷ own_hash_history γ γhist h 1 new ∗
     "Hentry" ∷ own_entry γ 1 key value.
   Proof.
     intros new um' hm'.
-    iIntros "(Hmap & Huser_map2 & Hpath & #Hhist_name & Hhist & Hfinish_old)".
-    iMod (map_state_insert key value Hhash Hnone Hbelongs with "[$Hmap $Huser_map2 $Hpath]")
-      as "(Hmap & Huser_map2 & Hpath & Hentry)".
-    iMod ("Hfinish_old" with "Hhist") as "Hhist".
-    iModIntro.
-    iNamed.
-    iFrameNamed.
-    iClear "Hhist_name".
+    iIntros "x"; iNamed "x".
     iNamed "Hhist".
+    iMod (map_state_insert key value Hhash Hnone Hbelongs with "[$Hmap $Huser_map2 $Hpath]")
+      as "x"; iNamed "x".
+    iMod (mono_list_auth_own_update (hist ++ [<[key:=value]> old]) with "Hown_hist") as "[Hown_hist #Hlb]".
+    {
+      apply prefix_app_r.
+      auto.
+    }
+    unfold own_hash_history.
+    iAssert (
+        ∀ linfo,
+          let invar := (λ hist,
+                          ∃ (status : lookup_status) mver,
+                            mono_list_idx_own γhist.(hh_hist_name)
+                                                      linfo.(lookup_version) mver ∗
+                            ⌜linfo.(lookup_version) < length hist - 1
+                            → status ≠ LookupPending⌝ ∗
+                            lookup_status_interp γ linfo status mver) in
+          let P := (invar hist) in
+          let Q := (invar (hist ++ [<[key:=value]> old])) in
+          (▷ □ (P ↔ Q))
+      )%I as "Hupdates".
+    {
+      rewrite length_app.
+      rewrite singleton_length.
+      replace ((length hist + 1)%nat - 1) with (Z.of_nat (length hist)) by lia.
+      iIntros.
+      iModIntro.
+      iModIntro.
+      iSplit; iIntros "x"; iNamed "x"; iDestruct "x" as "(#midx & %ver & x)".
+      - destruct status.
+        2: {
+          iFrame; iFrame "#";
+          iPureIntro; done.
+        }
+        2: {
+          iFrame; iFrame "#";
+          iPureIntro; done.
+        }
+        unfold lookup_status_interp.
+        iExists LookupDone, mver.
+        iSplit; first done.
+        iSplitR; first done.
+        iMod "x".
+        iNamed "x".
+        iDestruct "x" as "[x y]".
+        iSpecialize ("y" with "x").
+        iMod "y".
+        iApply fupd_mask_intro; [apply empty_subseteq|].
+        iIntros.
+        iFrame "y".
+        iFrame.
+      - iExists status, mver.
+        iFrame.
+        iFrame "#".
+        iPureIntro.
+        intros x.
+        assert (linfo.(lookup_version) < length hist) by lia.
+        specialize (ver H).
+        exact ver.
+    }
+    iModIntro.
+    iFrameNamed.
     iFrame.
-    done.
+    unfold map_current_version.
+    rewrite length_app.
+    rewrite singleton_length.
+    replace (Init.Nat.pred (length hist + 1)) with (length hist) by lia.
+    iSplit.
+    - iPureIntro.
+      apply lookup_app_Some.
+      right.
+      split; [lia|].
+      replace (length hist - length hist)%nat with 0%nat by lia.
+      rewrite list_lookup_singleton.
+      reflexivity.
+    - iDestruct (big_sepM_mono_with_inv with "Hupdates Hlookups") as "[Hupdates2 H1]"; [|iExact "H1"].
+      iIntros (k x lk) "(#a & b & %c & #d)".
+      iFrame "a b".
+      iSplit.
+      + iPureIntro.
+        lia.
+      + iApply (inv_iff with "d a").
   Qed.
 
-  Lemma map_state_register_lookup {γ γdone m hm E h γhist sub}
+  Lemma map_state_register_lookup {γ m hm (* E *) h γhist Φ}
     (key : K) :
+    (* (ht_au_mask ⊆ E) → *)
     h = uint.Z (hash_key key) →
-    map_state γ m hm -∗
-    own_hash_history γ γhist h 1 sub -∗
-    (|={⊤∖↑lookupEscrowN,∅}=> ∃ m, (own_ht_map γ m) ∗ (own_ht_map γ m ={∅,⊤∖↑lookupEscrowN}=∗ token γdone))
-    ={E}=∗
+    "Hmap" ∷ map_state γ m hm -∗
+    "Hhist" ∷ own_hash_history γ γhist h 1 m -∗
+    "Hpending" ∷ (
+        (AU <{ ∃∃ m : gmap K V, own_ht_map γ m }>
+           @ ht_au_mask, ∅
+                         <{ own_ht_map γ m, COMM Φ (ht_load_ret m key) }>)
+      )
+    ={⊤}=∗
     ∃ id ver,
-      map_state γ m hm ∗
-      ptsto_ro γ.(histories_name) h γhist ∗
-      own_hash_history γ γhist h 1 sub ∗
-      lookup_token γ id ver key.
+      "Hmap" ∷ map_state γ m hm ∗
+      "#Hhist_name" ∷ ptsto_ro γ.(histories_name) h γhist ∗
+      "Hhist" ∷ own_hash_history γ γhist h 1 m ∗
+      "Htok" ∷ lookup_token γ id ver key.
   Proof.
-    iIntros (?) "Hmap Hhist Hpending".
+    iIntros.
+    iNamed.
     iNamed "Hhist".
     unfold map_current_version in *.
     set (ver := map_current_version hist).
-    have Hver_lookup : hist !! ver = Some sub by exact Hhistory_cur.
+    have Hver_lookup : hist !! ver = Some m by exact Hcur.
     have Hver_lt : (ver < length hist)%nat.
     {
       rewrite /ver /map_current_version.
@@ -1360,9 +1482,98 @@ Section model.
     set (id := fresh (dom lookups)).
     have Hid_fresh : lookups !! id = None.
     { apply not_elem_of_dom. apply is_fresh. }
-    iMod (map_alloc id (mkLookupInfo key ver γdone) Hid_fresh with "Hown_lookups")
+    (* iMod "Hpending". *)
+    (* iDestruct "Hpending" as (x) "[Hown_map [_ Hpending_close]]". *)
+    iNamed "Hmap".
+    (* iDestruct (map_ctx_agree with "Huser_map Hown_map") as %->. *)
+    iMod (alloc_lookup_help_token (Φ (ht_load_ret m key))) as "x"; iNamed "x".
+    (* iApply fupd_mask_intro. *)
+
+    iMod (token_alloc) as (γconsumed) "consumed_token".
+
+    iMod (map_alloc id (mkLookupInfo key ver γdone γconsumed) Hid_fresh with "Hown_lookups")
       as "[Hown_lookups Hlookup_info]".
-    iDestruct "Hlookup_info" as "[Hlookup_hist Hlookup_tok]".
+
+    iMod "Hpending" as (x) "[map [_ cont]]".
+    iDestruct (map_ctx_agree with "map Huser_map") as %->.
+    iMod ("cont" with "map") as "Hcont".
+    iMod (fupd_mask_subseteq _) as "Hmask".
+    2: iMod ("HP_to_tok" with "Hcont") as "done_tok".
+    1: set_solver.
+    iMod "Hmask" as "_".
+
+    set (linfo := {|
+                   lookup_key := key;
+                   lookup_version := ver;
+                   lookup_done_name := γdone;
+                   lookup_consumed_name :=
+                     γconsumed
+                 |}) in *.
+
+    iMod (inv_alloc lookupInterpN _ (
+              ∃ (status : lookup_status) (mver : gmap K V),
+                    mono_list_idx_own γhist.(hh_hist_name)
+                      linfo.(lookup_version) mver ∗
+                    ⌜linfo.(lookup_version) < length hist - 1
+                     → status ≠ LookupPending⌝ ∗
+                    lookup_status_interp γ linfo status mver
+            ) with "[done_tok]") as "Hnew_inv".
+    {
+      iNext.
+      iExists LookupPending, m.
+      rewrite /ver /map_current_version.
+      replace (Z.of_nat (Init.Nat.pred (length hist))) with (length hist - 1) by lia.
+      iFrame "#".
+      iSplitR; [iPureIntro; intros; subst linfo; simpl in *; subst ver; rewrite /map_current_version in H0; lia|].
+      unfold lookup_status_interp.
+      simpl.
+      iMod "Hpending" as (x) "[map [_ cont]]".
+      iApply fupd_mask_intro; [apply empty_subseteq|].
+      iIntros "Hmask".
+      iFrame.
+      iIntros "Hown".
+      iSpecialize ("cont" with "Hown").
+      iMod "cont".
+      iMod (fupd_mask_subseteq _).
+      2: {
+        iSpecialize ("HP_to_tok" with "[cont]").
+        iMod ("HP_to_tok" with "[cont]") as "tok".
+
+      }
+      iModIntro.
+      iMod "Hpending_close".
+      iSpecialize ("HP_to_tok" with "Hpending_close").
+      iMod (fupd_mask_subseteq _) as "Hmask2".
+      2: {
+        iMod "HP_to_tok".
+        iFrame.
+        iMod "Hmask2" as "_".
+        iApply fupd_mask_intro.
+        { set_solver. }
+        iIntros.
+        done.
+      }
+      set_solver.
+    }
+
+    (* iMod ("Hpending_close" with "Hown_map") as "Hpending". *)
+    (* iSpecialize ("HP_to_tok" with "Hpending"). *)
+    (* iDestruct "Hlookup_info" as "[Hlookup_hist Hlookup_tok]". *)
+
+    iModIntro.
+    iFrame.
+    iFrame "#".
+    iSplitR.
+    { iPureIntro; split_and!; done. }
+
+    iSplitL; [|done].
+    iSplitR; [done|].
+    iApply big_sepM_insert; [exact Hid_fresh|].
+    iFrame.
+    simpl.
+    iSplitR; [iPureIntro; lia|].
+    iFrame "Hlookups".
+
     iMod (inv_alloc lookupInterpN _ (lookup_status_interp γ (mkLookupInfo key ver γdone) LookupPending)
            with "Hpending") as "#Hlookup_inv".
     iModIntro.
@@ -1377,45 +1588,42 @@ Section model.
     iExists LookupPending.
     simpl.
     iFrame "#".
-    iSplit; iPureIntro.
-    - lia.
-    - intros.
-      rewrite /ver /map_current_version in H0.
+    iSplit.
+    - iPureIntro. lia.
+    - iPureIntro. intros Hlt_old.
+      rewrite /ver /map_current_version in Hlt_old.
       lia.
   Qed.
 
   Lemma lookup_token_status_acc {γ id ver key h γhist sub} :
     h = uint.Z (hash_key key) →
-    lookup_token γ id ver key -∗
-    own_hash_history γ γhist h 1 sub -∗
-    own_hash_history γ γhist h 1 sub ∗
-    lookup_token γ id ver key ∗
+    "Htok" ∷ lookup_token γ id ver key -∗
+    "Hhist" ∷ own_hash_history γ γhist h 1 sub -∗
+    "Hhist" ∷ own_hash_history γ γhist h 1 sub ∗
+    "Htok" ∷ lookup_token γ id ver key ∗
     ∃ info status,
       ⌜info.(lookup_key) = key⌝ ∗
       ⌜info.(lookup_version) = ver⌝ ∗
-      inv lookupInterpN (lookup_status_interp γ info status).
+      "#Hlookup_inv" ∷ inv lookupInterpN (lookup_status_interp γ info status).
   Proof.
-    iIntros (Hhash) "Htok Hhist".
+    iIntros (Hh) "Htok Hhist".
     iNamed "Htok".
+    iNamedSuffix "Htok" "0".
+    iNamed "Hhist".
     iNamedSuffix "Hhist" "1".
-    rewrite -Hhash0 in Hhash; rewrite -Hhash.
-    iDestruct (ptsto_ro_agree with "Hhist_name Hhist_name1") as %->.
-    set (linfo := {|
-                     lookup_key := key;
-                     lookup_version := ver;
-                     lookup_done_name := γdone
-                   |}).
-    iDestruct (map_valid with "Hown_lookups1 Hlookup_info") as %Hlookup.
+    rewrite -Hhash0 in Hh.
+    assert (h0 = h) as -> by lia.
+    iDestruct (ptsto_ro_agree with "Hhist_name0 Hhist_name1") as %->.
+    iDestruct (map_valid with "Hown_lookups1 Hlookup_info0") as %Hlookup.
     iDestruct (big_sepM_lookup_acc with "Hlookups1")
       as "[[Hentry #Hr] Hlookups]"; first exact Hlookup.
     iSpecialize ("Hlookups" with "[$Hentry $Hr]").
     iFrame.
     iFrame "#".
-    rewrite Hhash0 in Hhash.
+    rewrite Hhash0 in Hh.
     iSplit; first done.
     iSplit; first done.
-    iDestruct "Hr" as (status) "(%Ha & %Hb & Hc)".
-    iExists linfo, status.
+    iDestruct "Hr" as (status) "(%Ha & %Hb & #Hc)".
     iFrame "#".
     iSplit; done.
   Qed.

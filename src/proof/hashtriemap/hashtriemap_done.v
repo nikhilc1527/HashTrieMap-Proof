@@ -44,6 +44,36 @@ Section proof.
   #[global] Instance : IsPkgInit (iProp Σ) hashtriemap := define_is_pkg_init True%I.
   #[global] Instance : GetIsPkgInitWf (iProp Σ) hashtriemap := build_get_is_pkg_init_wf.
 
+    Lemma wp_node__entry (n: loc) (e: loc) :
+    {{{ is_pkg_init hashtriemap ∗
+        n.[hashtriemap.node.t, "isEntry"] ↦□ true ∗
+        n.[hashtriemap.node.t, "ent"] ↦□ e }}}
+      n @! (go.PointerType hashtriemap.node) @! "entry" #()
+      {{{ RET #e; True }}}.
+  Proof.
+    wp_start as "(His_entry & Hent)".
+    wp_auto.
+    iApply "HΦ"; done.
+  Qed.
+
+
+  Lemma testing (e: loc) :
+    ∀ (Φ: val → iProp Σ),
+    is_pkg_init hashtriemap -∗
+    WP e @! (go.PointerType hashtriemap.node) @! "entry" #key {{ Φ }}.
+  Proof.
+    iIntros (Φ) "Hinit".
+    wp_method_call.
+    wp_call.
+    wp_call.
+    wp_auto.
+    iAssert (∃ (x : loc), e.[hashtriemap.node.t, "isEntry"] ↦□ true ∗ e.[hashtriemap.node.t, "ent"] ↦□ x)%I as (x) "[x y]".
+    { admit. }
+    wp_auto.
+        wp_start.
+        iApply "HΦ".
+        done.
+
   Lemma next_nibble_eq (key: w64) (path: path) :
     let h := uint.Z (hash_key key) in
     let n := (w64_word_instance.(word.and)
