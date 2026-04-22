@@ -12,3 +12,4 @@
 /src/generatedproof/
 .goose-output
 .gocache
+.codex

@@ -1,0 +1,38 @@
+{
+  "title": "Reader holds the old head across Swap",
+  "threads": [
+    {
+      "id": "writer",
+      "ops": [
+        {
+          "label": "seed",
+          "op": "LoadOrStore",
+          "key": 1,
+          "value": 10
+        },
+        {
+          "label": "replace-head",
+          "op": "Swap",
+          "key": 1,
+          "new": 20
+        }
+      ]
+    },
+    {
+      "id": "reader",
+      "ops": [
+        {
+          "label": "stale-load",
+          "op": "Load",
+          "key": 1
+        }
+      ]
+    }
+  ],
+  "schedule": [
+    { "thread": "writer", "count": 7 },
+    { "thread": "reader", "count": 2 },
+    { "thread": "writer", "count": 9 },
+    { "thread": "reader", "count": 2 }
+  ]
+}
